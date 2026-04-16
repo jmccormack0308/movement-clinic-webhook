@@ -549,6 +549,44 @@ async function sendEmailAndSlack({ to, subject, html, slackMessage }) {
   }
 }
 
+// Send error notification to Slack
+async function sendSlackError(context, errorMessage) {
+  try {
+    await axios.post('https://slack.com/api/chat.postMessage', {
+      channel: SLACK_CHANNEL_ID,
+      blocks: [
+        { type: 'header', text: { type: 'plain_text', text: '⚠️ Automation Error', emoji: true } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*Context:* ' + context } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*Error:* ' + errorMessage } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*Action Required:* Check Railway logs and verify GHL manually.' } }
+      ],
+      text: 'Automation Error: ' + context
+    }, {
+      headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
+    });
+  } catch (err) {
+    console.error('Failed to send Slack error notification:', err.message);
+  }
+}
+
+// Retry wrapper — attempts once, waits 5 seconds, tries again, then Slack error
+async function withRetry(fn, context) {
+  try {
+    return await fn();
+  } catch (firstErr) {
+    console.error(context + ' failed, retrying in 5 seconds:', firstErr.message);
+    await new Promise(resolve => setTimeout(resolve, 5000));
+    try {
+      return await fn();
+    } catch (secondErr) {
+      const errMsg = secondErr.response?.data ? JSON.stringify(secondErr.response.data) : secondErr.message;
+      console.error(context + ' failed after retry:', errMsg);
+      await sendSlackError(context, errMsg);
+      throw secondErr;
+    }
+  }
+}
+
 // Log event to in-memory store for daily digest
 async function logEventToRedis(eventData) {
   dailyEventLog.push({
@@ -2284,7 +2322,7 @@ app.post('/post-eval', async (req, res) => {
 
     // Always move to Evaluation Held first and pause 60 seconds for GHL to record the stage
     console.log('Moving to Evaluation Held stage...');
-    await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.EVALUATION_HELD, null);
+    await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.EVALUATION_HELD, null), 'Move to Evaluation Held — ' + patientFullName);
     console.log('Waiting 60 seconds for GHL to record Evaluation Held stage...');
     await new Promise(resolve => setTimeout(resolve, 60000));
     console.log('60 second pause complete — proceeding with outcome stage');
@@ -2327,7 +2365,7 @@ app.post('/post-eval', async (req, res) => {
 
         // Always create Continuity Pipeline opportunity for Stage 2
         try {
-          await createGHLOpportunity(contact.id, CONTINUITY_PIPELINE_ID, CONTINUITY_PURCHASED_STAGE_ID, patientFullName);
+          await withRetry(() => createGHLOpportunity(contact.id, CONTINUITY_PIPELINE_ID, CONTINUITY_PURCHASED_STAGE_ID, patientFullName), 'Create Continuity Pipeline card — ' + patientFullName);
           noteLines.push('✅ Continuity Pipeline opportunity created at Continuity Purchased.');
         } catch (err) {
           console.error('Failed to create continuity opportunity:', err.message);
@@ -2355,7 +2393,7 @@ app.post('/post-eval', async (req, res) => {
         // Create GHL calendar appointment
         if (claudeResult.follow_up_call_date && claudeResult.follow_up_call_time && ptInfo.calendarId) {
           const ptFirstName = evaluating_pt.split(' ')[0];
-          await createGHLCalendarAppointment(
+          await withRetry(() => createGHLCalendarAppointment(
             contact.id,
             ptInfo.calendarId,
             ptInfo.ghlUserId,
@@ -2363,7 +2401,7 @@ app.post('/post-eval', async (req, res) => {
             ptFirstName,
             claudeResult.follow_up_call_date,
             claudeResult.follow_up_call_time
-          );
+          ), 'Create calendar appointment — ' + patientFullName);
           noteLines.push(`✅ GHL calendar appointment created for ${evaluating_pt}.`);
         }
 
@@ -2404,7 +2442,7 @@ app.post('/post-eval', async (req, res) => {
 
     // Update Customer Pipeline opportunity stage
     if (newStageId) {
-      await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, null);
+      await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, null), 'Final stage update — ' + patientFullName);
       console.log(`Customer Pipeline updated to stage: ${newStageId}`);
     }
 
@@ -2616,36 +2654,13 @@ app.post('/post-eval', async (req, res) => {
     res.status(200).json({ success: true, outcome, pending_subtype: claudeResult.pending_subtype });
 
   } catch (error) {
-    console.error('Post-eval processing error:', error.response?.data || error.message);
-
-    // Error notification to Jordan
-    try {
-      await axios.post(EVAL_JORDAN_WEBHOOK, {
-        contact_name: req.body.patient_first_name + ' ' + req.body.patient_last_name || 'Unknown',
-        contact_phone: req.body.patient_phone || 'Unknown',
-        evaluating_pt: req.body.evaluating_pt || 'Unknown',
-        outcome: 'ERROR — Form submission failed',
-        stage: 'N/A',
-        payment_method: 'N/A',
-        evaluation_summary: 'The post-eval form failed to process. Manual GHL update required.',
-        next_steps: 'Check Railway logs immediately and update GHL manually.',
-        red_flags: 'SYSTEM ERROR: ' + (error.message || 'Unknown error'),
-        calendar_appointment_created: 'N/A',
-        continuity_opportunity_created: 'N/A',
-        rehab_essentials: 'N/A',
-        checkin_text_scheduled: 'N/A',
-        send_checkin_text: 'N/A',
-        checkin_text: '',
-        objection_category: '',
-        objection_detail: '',
-        physician_name: '',
-        physician_office: '',
-        coaching_notes: 'No coaching notes — form processing failed before analysis completed.'
-      }, { headers: { 'Content-Type': 'application/json' } });
-    } catch (notifyErr) {
-      console.error('Failed to send error notification:', notifyErr.message);
-    }
-
+    const errMsg = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+    console.error('Post-eval processing error:', errMsg);
+    const patientName = (req.body.patient_first_name || '') + ' ' + (req.body.patient_last_name || '');
+    await sendSlackError(
+      'Post-Eval Form Failed — ' + patientName.trim() + ' (PT: ' + (req.body.evaluating_pt || 'Unknown') + ')',
+      errMsg + ' — Manual GHL update required. Check Railway logs.'
+    );
     res.status(500).json({ error: error.message });
   }
 });
