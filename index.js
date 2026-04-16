@@ -17,6 +17,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 const SLACK_DEALS_CHANNEL_ID = 'C07T7PK0GAE';
+const RAILWAY_FORM_URL = process.env.RAILWAY_STATIC_URL ? 'https://' + process.env.RAILWAY_STATIC_URL + '/post-eval' : null;
 
 // Slack user IDs for PT tagging
 const SLACK_USER_MAP = {
@@ -366,7 +367,7 @@ OUTCOME I - RECORDS_REQUEST: An existing patient is calling specifically to requ
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NON_LEAD_CALL or RECORDS_REQUEST","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NON_LEAD_CALL or RECORDS_REQUEST","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","extracted_email":"email address mentioned in transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -1291,6 +1292,31 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
             : [])
         ]
       };
+      // Build pre-filled post-eval form URL
+      const patientEmail = claudeResult.extracted_email || (contact ? contact.email : null) || '';
+      const patientFirstName = finalContactName ? finalContactName.split(' ')[0] : '';
+      const patientLastName = finalContactName ? finalContactName.split(' ').slice(1).join(' ') : '';
+      const formUrl = RAILWAY_FORM_URL
+        ? RAILWAY_FORM_URL +
+          '?first=' + encodeURIComponent(patientFirstName) +
+          '&last=' + encodeURIComponent(patientLastName) +
+          '&phone=' + encodeURIComponent(contactPhone || '') +
+          '&email=' + encodeURIComponent(patientEmail)
+        : null;
+
+      // Add form button to deals board message if URL is available
+      if (formUrl) {
+        dealMsg.blocks.push({
+          type: 'actions',
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: 'Open Post-Eval Form →', emoji: true },
+            url: formUrl,
+            style: 'primary'
+          }]
+        });
+      }
+
       try {
         const dealPayload = { channel: SLACK_DEALS_CHANNEL_ID, text: dealMsg.fallback, blocks: dealMsg.blocks };
         await axios.post('https://slack.com/api/chat.postMessage', dealPayload, {
@@ -2144,6 +2170,15 @@ app.get('/post-eval', (req, res) => {
   });
 
   // Form submission
+  // Pre-fill form from URL parameters (set by Slack deals board button)
+  (function() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('first')) document.querySelector('[name="patient_first_name"]').value = params.get('first');
+    if (params.get('last')) document.querySelector('[name="patient_last_name"]').value = params.get('last');
+    if (params.get('phone')) document.querySelector('[name="patient_phone"]').value = params.get('phone');
+    if (params.get('email')) document.querySelector('[name="patient_email"]').value = params.get('email');
+  })();
+
   document.getElementById('evalForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     const btn = document.getElementById('submitBtn');
