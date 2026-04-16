@@ -359,10 +359,14 @@ OUTCOME F - VOICEMAIL: A voicemail was left. The system will automatically advan
 
 OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The system will automatically advance the day/week stage. Set action to UPDATE and return current pipeline ID and null for new_stage_id. Log the attempt.
 
+OUTCOME H - NON_LEAD_CALL: The caller is clearly not a potential patient or lead. This includes: insurance companies calling to verify patient visits, law offices asking about lien arrangements, vendors or sales callers, physician offices calling about fax numbers or referral paperwork, wrong department calls, or any other administrative/business call unrelated to someone seeking PT services. Set action to NO_ACTION. No pipeline changes, no contact creation.
+
+OUTCOME I - RECORDS_REQUEST: An existing patient is calling specifically to request copies of their own records or documentation. This must be the patient themselves calling, not a third party asking about a patient. Set action to NO_ACTION. The system will add a note and create a task for the admin team.
+
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NON_LEAD_CALL or RECORDS_REQUEST","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -935,6 +939,34 @@ app.post('/webhook', async (req, res) => {
     );
 
     console.log(`Claude decision: ${claudeResult.outcome}`);
+
+    // Handle non-lead and records request calls immediately
+    if (claudeResult.outcome === 'NON_LEAD_CALL') {
+      console.log('Non-lead call detected — no action taken, skipping silently');
+      return;
+    }
+
+    if (claudeResult.outcome === 'RECORDS_REQUEST') {
+      console.log('Records request detected — adding note and task');
+      if (contact) {
+        const recordsNote = 'Claude AI Assistant:\n\n' + getTimestamp() + '\n\nPatient called requesting copies of their records. Task created for admin team to follow up.';
+        await addNoteToContact(contact.id, recordsNote);
+        const taskDue = new Date();
+        taskDue.setDate(taskDue.getDate() + 1);
+        const patientFirst = (finalContactName || 'Unknown').split(' ')[0];
+        const patientLast = (finalContactName || 'Unknown').split(' ').slice(1).join(' ') || '';
+        await createGHLTask(
+          contact.id,
+          patientFirst + ' ' + patientLast + ' is Requesting Records',
+          taskDue,
+          'Please email them their records as they requested.'
+        );
+        console.log('Records request note and task created');
+      } else {
+        console.log('Records request but no GHL contact found — skipping');
+      }
+      return;
+    }
 
     // Update contact name if extracted from transcript
     let finalContactName = contactName;
