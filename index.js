@@ -1,6 +1,9 @@
 const express = require('express');
 const axios = require('axios');
 
+// In-memory event log for daily digest — resets on deployment
+const dailyEventLog = [];
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
@@ -10,6 +13,12 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 const QUO_API_KEY = process.env.QUO_API_KEY;
 const GHL_LOCATION_ID = '6oqyEZ6nlqPw4cDsaKzi';
 const GHL_SUMMARY_WEBHOOK = process.env.GHL_SUMMARY_WEBHOOK;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
+const TEAM_EMAIL = 'info@movementclinicpt.com';
+const JORDAN_EMAIL = 'jordan@movementclinicpt.com';
+const FROM_EMAIL = 'claude@movementclinicpt.com';
 const TASK_ASSIGNEE_ID = '3EuCG6xznkq3A2CeDhDQ';
 const TASK_TITLE = 'Claude Assistant: Follow up from previous conversation thread';
 
@@ -338,7 +347,7 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary of what happened and what the next step is — no jargon or pipeline codes","follow_up_days":null}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -459,6 +468,179 @@ async function createGHLTask(contactId, title, dueDate) {
   );
 }
 
+async function sendEmailAndSlack({ to, subject, html, slackMessage }) {
+  // Send email via Resend
+  try {
+    await axios.post('https://api.resend.com/emails', {
+      from: FROM_EMAIL,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html
+    }, {
+      headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' }
+    });
+    console.log('Email sent via Resend to: ' + (Array.isArray(to) ? to.join(', ') : to));
+  } catch (err) {
+    console.error('Resend email failed:', err.response?.data || err.message);
+  }
+
+  // Send Slack message via Slack API
+  try {
+    await axios.post('https://slack.com/api/chat.postMessage', {
+      channel: SLACK_CHANNEL_ID,
+      text: slackMessage
+    }, {
+      headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
+    });
+    console.log('Slack message sent successfully');
+  } catch (err) {
+    console.error('Slack message failed:', err.response?.data || err.message);
+  }
+}
+
+// Log event to in-memory store for daily digest
+async function logEventToRedis(eventData) {
+  dailyEventLog.push({
+    ...eventData,
+    timestamp: new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true }) + ' PT'
+  });
+  console.log('Event logged for daily digest — total today: ' + dailyEventLog.length);
+}
+
+// Send Slack notification only (no email)
+async function sendSlackMessage(messageOrBlocks) {
+  try {
+    const payload = { channel: SLACK_CHANNEL_ID };
+    if (typeof messageOrBlocks === 'string') {
+      payload.text = messageOrBlocks;
+    } else {
+      payload.text = messageOrBlocks.fallback || 'Claude AI Assistant update';
+      payload.blocks = messageOrBlocks.blocks;
+    }
+    await axios.post('https://slack.com/api/chat.postMessage', payload, {
+      headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
+    });
+    console.log('Slack message sent');
+  } catch (err) {
+    console.error('Slack message failed:', err.response?.data || err.message);
+  }
+}
+
+function buildCallSlackBlocks(params) {
+  const { contactName, contactPhone, callTime, teamMember, outcome, pipeline, stageDisplay, redFlags } = params;
+  const hasFlag = redFlags && redFlags !== 'None';
+  return {
+    fallback: 'Claude AI Assistant — Call Summary for ' + contactName,
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
+      { type: 'divider' },
+      { type: 'section', fields: [
+        { type: 'mrkdwn', text: '*Name*\n' + (contactName || 'Unknown') },
+        { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') }
+      ]},
+      { type: 'divider' },
+      { type: 'section', fields: [
+        { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
+        { type: 'mrkdwn', text: '*Team Member*\n' + (teamMember || 'Not identified') }
+      ]},
+      { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See GHL for details') } },
+      { type: 'divider' },
+      { type: 'section', fields: [
+        { type: 'mrkdwn', text: '*Pipeline*\n' + (pipeline || 'Unknown') },
+        { type: 'mrkdwn', text: '*Stage*\n' + (stageDisplay || 'Unknown') }
+      ]},
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } }
+    ]
+  };
+}
+
+function buildEvalSlackBlocks(params) {
+  const { patientName, patientPhone, evalDate, evaluatingPT, planOfCarePT, outcome, stageDisplay, redFlags } = params;
+  const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'None identified.';
+  return {
+    fallback: 'Claude AI Assistant — Post-Eval Summary for ' + patientName,
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Post-Eval Summary', emoji: true } },
+      { type: 'divider' },
+      { type: 'section', fields: [
+        { type: 'mrkdwn', text: '*Name*\n' + (patientName || 'Unknown') },
+        { type: 'mrkdwn', text: '*Phone*\n' + (patientPhone || 'Unknown') }
+      ]},
+      { type: 'divider' },
+      { type: 'section', fields: [
+        { type: 'mrkdwn', text: '*Date*\n' + (evalDate || 'Unknown') },
+        { type: 'mrkdwn', text: '*Evaluating PT*\n' + (evaluatingPT || 'Unknown') }
+      ]},
+      { type: 'section', text: { type: 'mrkdwn', text: '*Plan of Care PT*\n' + (planOfCarePT || 'Unknown') } },
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See email for full details') } },
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: '*Pipeline Update*\nStage: ' + (stageDisplay || 'Unknown') } },
+      { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } }
+    ]
+  };
+}
+
+// Send daily digest email via Resend
+async function sendDailyDigest() {
+  try {
+    if (!dailyEventLog || dailyEventLog.length === 0) {
+      console.log('No events to digest today');
+      return;
+    }
+
+    const events = [...dailyEventLog];
+    const dateLabel = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+
+    // Have Claude write the digest email
+    const digestPrompt = 'You are writing a daily operations digest email for Movement Clinic Physical Therapy. Summarize the following events that Claude processed today into a clean, well-organized HTML email. Group by type: calls first, then evaluations. For each event include the key action taken. Be concise.\n\nDate: ' + dateLabel + '\n\nEvents:\n' + events.map((e, i) => (i + 1) + '. [' + e.type + '] ' + e.contact + ' — ' + e.summary + ' (' + e.timestamp + ')').join('\n') + '\n\nWrite a professional HTML email with inline styles, Montserrat font, max-width 600px. Include:\n- Header with date and total event count\n- Grouped sections for Calls and Evaluations\n- Brief summary row per event\n- Footer note\n\nReturn ONLY the HTML string, no JSON wrapper, no markdown.';
+
+    const response = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      { model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages: [{ role: 'user', content: digestPrompt }] },
+      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
+    );
+
+    const digestHtml = response.data.content[0].text.replace(/```html|```/g, '').trim();
+
+    await axios.post('https://api.resend.com/emails', {
+      from: FROM_EMAIL,
+      to: [JORDAN_EMAIL],
+      subject: 'Daily Operations Digest — ' + dateLabel + ' (' + events.length + ' events)',
+      html: digestHtml
+    }, {
+      headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' }
+    });
+
+    console.log('Daily digest sent — ' + events.length + ' events');
+
+    // Clear today's events after sending
+    dailyEventLog.length = 0;
+  } catch (err) {
+    console.error('Daily digest failed:', err.response?.data || err.message);
+  }
+}
+
+// Schedule daily digest at 6pm PT
+function scheduleDailyDigest() {
+  const now = new Date();
+  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const target = new Date(pst);
+  target.setHours(18, 0, 0, 0);
+  if (pst >= target) target.setDate(target.getDate() + 1);
+  const msUntilDigest = target - pst;
+  console.log('Daily digest scheduled in ' + Math.round(msUntilDigest / 60000) + ' minutes');
+  setTimeout(async () => {
+    await sendDailyDigest();
+    setInterval(sendDailyDigest, 24 * 60 * 60 * 1000);
+  }, msUntilDigest);
+}
+
+scheduleDailyDigest();
+
+// Keep GHL webhook for sheet logger and other non-email uses
 async function fireGHLSummaryWebhook(summaryData) {
   if (!GHL_SUMMARY_WEBHOOK) return;
   try {
@@ -468,10 +650,7 @@ async function fireGHLSummaryWebhook(summaryData) {
       else if (typeof val === 'object') sanitized[key] = JSON.stringify(val);
       else sanitized[key] = String(val).replace(/\n/g, ' ').replace(/\r/g, '');
     }
-    await axios.post(GHL_SUMMARY_WEBHOOK, sanitized, {
-      headers: { 'Content-Type': 'application/json' }
-    });
-    console.log('Summary webhook fired to GHL successfully');
+    await axios.post(GHL_SUMMARY_WEBHOOK, sanitized, { headers: { 'Content-Type': 'application/json' } });
   } catch (err) {
     console.error('Failed to fire GHL summary webhook:', err.message);
   }
@@ -605,6 +784,13 @@ app.post('/webhook', async (req, res) => {
     if (!transcript || transcript.trim().length === 0) {
       return res.status(200).json({ message: 'Empty transcript, skipping' });
     }
+
+    // Respond immediately to prevent Quo from retrying due to timeout
+    res.status(200).json({ message: 'Received — processing in background' });
+
+    // Process asynchronously after responding
+    setImmediate(async () => {
+    try {
 
     console.log(`Processing call ${callId}, transcript length: ${transcript.length}`);
 
@@ -828,47 +1014,42 @@ app.post('/webhook', async (req, res) => {
       pipelineStageInfo = 'Pipeline: ' + (PIPELINE_NAMES[finalPipelineId] || finalPipelineId) + ' | Stage: ' + (STAGE_NAMES[previousStageId] || 'Unknown') + ' (no change)';
     }
 
-    // Generate Claude-written email and Slack message — no variable mapping needed
-    try {
-      const emailContent = await generateCallEmailContent({
-        contactName: finalContactName || 'Unknown',
-        contactPhone: contactPhone || 'Unknown',
-        outcome: claudeResult.outcome || '',
-        note: claudeResult.note || '',
-        pipelineName: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || '',
-        previousStage: STAGE_NAMES[previousStageId] || 'Unknown',
-        newStage: STAGE_NAMES[finalStageId] || finalStageId || '',
-        stageChanged,
-        opportunityValue: claudeResult.opportunity_value ? '$' + claudeResult.opportunity_value : null,
-        disqualifierReason: claudeResult.disqualifier_reason || null,
-        isNewContact,
-        isNewOpportunity,
-        taskCreated,
-        followUpDays: claudeResult.follow_up_days || null,
-        nameExtracted: claudeResult.extracted_name || null
-      });
-      await fireGHLSummaryWebhook({
-        email_body: emailContent.email_html || '',
-        slack_message: emailContent.slack_message || '',
-        contact_name: String(finalContactName || 'Unknown'),
-        contact_id: String(contact.id || '')
-      });
-    } catch (emailErr) {
-      console.error('Failed to generate email content — full error:', JSON.stringify(emailErr.message || emailErr.response?.data || emailErr));
-      await fireGHLSummaryWebhook({
-        email_body: '<p>Call processed. Outcome: ' + (claudeResult.outcome || 'Unknown') + '. Contact: ' + (finalContactName || 'Unknown') + '.</p>',
-        slack_message: 'Call processed for ' + (finalContactName || 'Unknown') + '. Outcome: ' + (claudeResult.outcome || 'Unknown'),
-        contact_name: String(finalContactName || 'Unknown'),
-        contact_id: String(contact.id || '')
-      });
-    }
+    // Send real-time Slack notification and log for daily digest
+    const previousStageName = STAGE_NAMES[previousStageId] || null;
+    const newStageName = STAGE_NAMES[finalStageId] || finalStageId || 'Unknown';
+    const stageDisplay = isNewOpportunity
+      ? 'No previous stage (new opportunity) → ' + newStageName
+      : stageChanged
+        ? (previousStageName || 'Unknown') + ' → ' + newStageName
+        : newStageName + ' (no change)';
+
+    const callBlocks = buildCallSlackBlocks({
+      contactName: finalContactName || 'Unknown',
+      contactPhone: contactPhone || 'Unknown',
+      callTime: getTimestamp(),
+      teamMember: claudeResult.team_member || 'Not identified in transcript',
+      outcome: claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details',
+      pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
+      stageDisplay,
+      redFlags: claudeResult.disqualifier_reason || 'None'
+    });
+    await sendSlackMessage(callBlocks);
+
+    await logEventToRedis({
+      type: 'Call',
+      contact: (finalContactName || 'Unknown') + ' ' + (contactPhone || ''),
+      summary: (claudeResult.outcome || 'Unknown') + ' — ' + (PIPELINE_NAMES[finalPipelineId] || '') + (stageChanged ? ' — Stage: ' + (STAGE_NAMES[previousStageId] || '') + ' to ' + (STAGE_NAMES[finalStageId] || '') : '')
+    });
 
     console.log(`Successfully processed call ${callId}: ${claudeResult.outcome}`);
-    res.status(200).json({ success: true, outcome: claudeResult.outcome });
 
-  } catch (error) {
-    console.error('Error processing webhook:', error.response?.data || error.message);
-    res.status(500).json({ error: error.message });
+    } catch (error) {
+      console.error('Error processing webhook:', error.response?.data || error.message);
+    }
+    }); // end setImmediate
+
+  } catch (outerError) {
+    console.error('Webhook outer error:', outerError.message);
   }
 });
 
@@ -2029,7 +2210,8 @@ app.post('/post-eval', async (req, res) => {
       physician_office: String(claudeResult.physician_office || '')
     };
 
-    // Generate Claude-written email content for post-eval
+    // Generate Claude-written eval emails — send immediately via Resend + Slack notification + Redis log
+    console.log('Generating eval summary emails...');
     try {
       const evalEmailContent = await generateEvalEmailContent({
         contactName: patientFullName,
@@ -2052,27 +2234,60 @@ app.post('/post-eval', async (req, res) => {
         physicianOffice: claudeResult.physician_office || null,
         coachingNotes: claudeResult.coaching_notes || 'No coaching notes generated.'
       });
+      console.log('Eval email content generated — sending...');
 
-      // Team email — no coaching notes
-      await axios.post(EVAL_TEAM_WEBHOOK, {
-        email_body: evalEmailContent.team_email_html || '',
-        slack_message: evalEmailContent.slack_message || '',
-        contact_name: String(patientFullName || ''),
-        contact_id: String(contact.id || '')
-      }, { headers: { 'Content-Type': 'application/json' } });
-      console.log('Team eval webhook fired');
+      const evalSubject = 'Post-Eval Summary — ' + patientFullName + ' (' + outcome + (stage ? ' ' + stage : '') + ')';
 
-      // Jordan email — includes coaching notes
-      await axios.post(EVAL_JORDAN_WEBHOOK, {
-        email_body: evalEmailContent.jordan_email_html || '',
-        slack_message: evalEmailContent.slack_message || '',
-        contact_name: String(patientFullName || ''),
-        contact_id: String(contact.id || '')
-      }, { headers: { 'Content-Type': 'application/json' } });
-      console.log('Jordan eval webhook fired');
+      // Team email — no coaching notes, sent immediately
+      await sendEmailAndSlack({
+        to: [TEAM_EMAIL],
+        subject: evalSubject,
+        html: evalEmailContent.team_email_html || '<p>Eval processed for ' + patientFullName + '</p>',
+        slackMessage: null
+      });
+      console.log('Team eval email sent');
+
+      // Jordan email — includes coaching notes, sent immediately
+      await sendEmailAndSlack({
+        to: [JORDAN_EMAIL],
+        subject: evalSubject + ' — Full + Coaching Notes',
+        html: evalEmailContent.jordan_email_html || '<p>Eval processed for ' + patientFullName + '</p>',
+        slackMessage: null
+      });
+      console.log('Jordan eval email sent');
+
+      // Real-time Slack notification for eval
+      const evalStageDisplay = outcome === 'Converted'
+        ? 'Package Purchased'
+        : outcome === 'Lost'
+          ? 'Closed/Lost'
+          : claudeResult.pending_subtype === 'PENDING_CALL'
+            ? 'Pending — Follow Up Phone Call Booked'
+            : claudeResult.pending_subtype === 'PENDING_VISIT'
+              ? 'Pending — Follow Up Visit Booked'
+              : 'Pending — Needs Follow Up (No Firm Time Established)';
+
+      const evalBlocks = buildEvalSlackBlocks({
+        patientName: patientFullName,
+        patientPhone: patient_phone,
+        evalDate: getTimestamp(),
+        evaluatingPT: evaluating_pt,
+        planOfCarePT: planOfCarePT,
+        outcome: claudeResult.evaluation_summary || claudeResult.next_steps || 'See email for full details',
+        stageDisplay: evalStageDisplay,
+        redFlags: claudeResult.red_flags || 'None'
+      });
+      await sendSlackMessage(evalBlocks);
+
+      // Log to Redis for daily digest
+      await logEventToRedis({
+        type: 'Evaluation',
+        contact: patientFullName + ' ' + patient_phone,
+        summary: outcome + (stage ? ' ' + stage : '') + ' — PT: ' + evaluating_pt + ' — ' + (claudeResult.next_steps || 'No next steps')
+      });
 
     } catch (emailErr) {
-      console.error('Failed to generate eval email content:', emailErr.message);
+      console.error('Eval email/Slack failed:', emailErr.response?.data ? JSON.stringify(emailErr.response.data) : emailErr.message || String(emailErr));
     }
 
     res.status(200).json({ success: true, outcome, pending_subtype: claudeResult.pending_subtype });
