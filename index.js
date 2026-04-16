@@ -16,6 +16,17 @@ const GHL_SUMMARY_WEBHOOK = process.env.GHL_SUMMARY_WEBHOOK;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
+const SLACK_DEALS_CHANNEL_ID = 'C07T7PK0GAE';
+
+// Slack user IDs for PT tagging
+const SLACK_USER_MAP = {
+  'Katy Vieira': 'U08REDY0146',
+  'Shane Abbott': 'U07SAF0R2NQ',
+  'TJ Aquino': 'U0A9DL4RTKN',
+  'Chris Bostwick': 'U091NMDKTFV',
+  'John Gan': 'U07TJC6GZFG',
+  'Jordan McCormack': null
+};
 const TEAM_EMAIL = 'info@movementclinicpt.com';
 const JORDAN_EMAIL = 'jordan@movementclinicpt.com';
 const FROM_EMAIL = 'claude@movementclinicpt.com';
@@ -334,9 +345,9 @@ DECISION RULES:
 
 5. Based on the transcript, determine the outcome:
 
-OUTCOME A - EVAL SCHEDULED: Person agreed to come in for an evaluation or free screen. Move to Eval Scheduled stage. Log appointment details if mentioned.
+OUTCOME A - EVAL SCHEDULED: Person agreed to come in for an evaluation, assessment, or free screen (assessment and evaluation are the same thing). Move to Eval Scheduled stage. Log appointment details if mentioned.
 
-OUTCOME B - NEEDS FOLLOW UP: Person gave an objection but did not disengage. Common objections: wants insurance/in-network care, needs to speak with spouse, needs to think about it, price concerns, not ready yet. Move to the most appropriate Needs Follow Up or Talked To But Didnt Schedule stage. Log the specific objection.
+OUTCOME B - NEEDS FOLLOW UP: Person gave an objection but did not disengage. Common objections: wants insurance/in-network care, needs to speak with spouse, needs to think about it, price concerns, not ready yet, requested follow-up by email or phone in a specific timeframe (e.g. "reach out in 2-3 weeks", "email me next month"). Move to the most appropriate Needs Follow Up or Talked To But Didnt Schedule stage. Log the specific objection. If a timeframe was mentioned, extract follow_up_days.
 
 OUTCOME C - ON HOLD: Person explicitly said they want to be contacted again at a specific future time. Move to On Hold or Call Later stage. Log the timeframe.
 
@@ -351,7 +362,7 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary of what happened and what the next step is — no jargon or pipeline codes","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -456,6 +467,19 @@ async function createGHLOpportunity(contactId, pipelineId, stageId, name) {
     { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
   );
   return response.data.opportunity;
+}
+
+async function updateGHLOpportunityName(opportunityId, name) {
+  try {
+    await axios.put(
+      `https://services.leadconnectorhq.com/opportunities/${opportunityId}`,
+      { name },
+      { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
+    );
+    console.log('Opportunity name updated to: ' + name);
+  } catch (err) {
+    console.error('Failed to update opportunity name:', err.response?.data || err.message);
+  }
 }
 
 async function updateGHLOpportunity(opportunityId, pipelineId, stageId, value) {
@@ -920,6 +944,10 @@ app.post('/webhook', async (req, res) => {
         await updateGHLContactName(contact.id, nameParts[0], nameParts.slice(1).join(' ') || '');
         finalContactName = claudeResult.extracted_name;
         console.log(`Updated contact name to: ${finalContactName}`);
+        // Also update the opportunity card name if one exists
+        if (activeOpportunity) {
+          await updateGHLOpportunityName(activeOpportunity.id, capitalizeFullName(finalContactName));
+        }
       } catch (err) {
         console.error('Failed to update contact name:', err.message);
       }
@@ -1070,12 +1098,12 @@ app.post('/webhook', async (req, res) => {
     }
 
     // Send real-time Slack notification and log for daily digest
-    const previousStageName = STAGE_NAMES[previousStageId] || null;
-    const newStageName = STAGE_NAMES[finalStageId] || finalStageId || 'Unknown';
+    const previousStageName = STAGE_NAMES[previousStageId] || (opportunity ? opportunity.pipelineStageName : null) || previousStageId || 'Unknown';
+    const newStageName = STAGE_NAMES[finalStageId] || finalStageId || (opportunity ? opportunity.pipelineStageName : null) || 'Unknown';
     const stageDisplay = isNewOpportunity
       ? 'No previous stage (new opportunity) → ' + newStageName
       : stageChanged
-        ? (previousStageName || 'Unknown') + ' → ' + newStageName
+        ? previousStageName + ' → ' + newStageName
         : newStageName + ' (no change)';
 
     // Build plain language outcome for Slack
@@ -1142,6 +1170,10 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
+    const ghlUrl = activeOpportunity
+      ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + activeOpportunity.id
+      : null;
+
     const callBlocks = buildCallSlackBlocks({
       contactName: finalContactName || 'Unknown',
       contactPhone: contactPhone || 'Unknown',
@@ -1158,6 +1190,40 @@ app.post('/webhook', async (req, res) => {
       opportunityId: activeOpportunity ? activeOpportunity.id : null
     });
     await sendSlackMessage(callBlocks);
+
+    // Send to deals board channel if eval was scheduled
+    if (claudeResult.outcome === 'EVAL_SCHEDULED') {
+      const ptName = extractedTeamMember || claudeResult.team_member || null;
+      const ptSlackId = ptName && SLACK_USER_MAP[ptName] ? SLACK_USER_MAP[ptName] : null;
+      const ptMention = ptSlackId ? '<@' + ptSlackId + '>' : (ptName || 'Team');
+      const dealMsg = {
+        fallback: 'New Eval Booked — ' + capitalizeFullName(finalContactName),
+        blocks: [
+          { type: 'header', text: { type: 'plain_text', text: '🎉 Evaluation Booked', emoji: true } },
+          { type: 'section', fields: [
+            { type: 'mrkdwn', text: '*Patient*\n' + (ghlUrl ? '<' + ghlUrl + '|' + capitalizeFullName(finalContactName) + '>' : capitalizeFullName(finalContactName)) },
+            { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') }
+          ]},
+          { type: 'section', fields: [
+            { type: 'mrkdwn', text: '*PT*\n' + ptMention },
+            { type: 'mrkdwn', text: '*Call Time*\n' + getTimestamp() }
+          ]},
+          { type: 'section', text: { type: 'mrkdwn', text: '*Details*\n' + (claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details') } },
+          ...(claudeResult.red_flags_detail && claudeResult.red_flags_detail !== 'None' && claudeResult.red_flags_detail !== 'null'
+            ? [{ type: 'section', text: { type: 'mrkdwn', text: ':warning: *Red Flags*\n' + claudeResult.red_flags_detail } }]
+            : [])
+        ]
+      };
+      try {
+        const dealPayload = { channel: SLACK_DEALS_CHANNEL_ID, text: dealMsg.fallback, blocks: dealMsg.blocks };
+        await axios.post('https://slack.com/api/chat.postMessage', dealPayload, {
+          headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
+        });
+        console.log('Deals board Slack message sent');
+      } catch (err) {
+        console.error('Deals board Slack failed:', err.response?.data || err.message);
+      }
+    }
 
     // Create GHL calendar appointment for firm follow-up calls
     if (claudeResult.follow_up_date && claudeResult.follow_up_time) {
