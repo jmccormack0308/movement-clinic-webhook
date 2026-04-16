@@ -347,7 +347,7 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary of what happened and what the next step is — no jargon or pipeline codes","follow_up_days":null}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary of what happened and what the next step is — no jargon or pipeline codes","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none"}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -526,33 +526,46 @@ async function sendSlackMessage(messageOrBlocks) {
   }
 }
 
+function capitalizeFullName(name) {
+  if (!name) return 'Unknown';
+  return name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+}
+
 function buildCallSlackBlocks(params) {
-  const { contactName, contactPhone, callTime, teamMember, outcome, pipeline, stageDisplay, redFlags } = params;
-  const hasFlag = redFlags && redFlags !== 'None';
-  return {
-    fallback: 'Claude AI Assistant — Call Summary for ' + contactName,
-    blocks: [
-      { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
-      { type: 'divider' },
-      { type: 'section', fields: [
-        { type: 'mrkdwn', text: '*Name*\n' + (contactName || 'Unknown') },
-        { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') }
-      ]},
-      { type: 'divider' },
-      { type: 'section', fields: [
-        { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
-        { type: 'mrkdwn', text: '*Team Member*\n' + (teamMember || 'Not identified') }
-      ]},
-      { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See GHL for details') } },
-      { type: 'divider' },
-      { type: 'section', fields: [
-        { type: 'mrkdwn', text: '*Pipeline*\n' + (pipeline || 'Unknown') },
-        { type: 'mrkdwn', text: '*Stage*\n' + (stageDisplay || 'Unknown') }
-      ]},
-      { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } }
-    ]
-  };
+  const { contactName, contactPhone, callTime, teamMember, outcome, pipeline, stageDisplay, redFlags, clinicalSummary, isNewOpportunity } = params;
+  const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'null';
+  const hasSummary = clinicalSummary && clinicalSummary !== 'null' && clinicalSummary !== 'None';
+  const pipelineDisplay = isNewOpportunity
+    ? 'New opportunity — added to ' + pipeline + ' pipeline'
+    : 'Pre-existed in ' + pipeline + ' pipeline';
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
+    { type: 'divider' },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: '*Name*\n' + capitalizeFullName(contactName) },
+      { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') },
+      { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
+      { type: 'mrkdwn', text: '*Team Member*\n' + (teamMember || 'Not identified') }
+    ]},
+    { type: 'divider' },
+    { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See GHL for details') } }
+  ];
+
+  if (hasSummary) {
+    blocks.push({ type: 'divider' });
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*Summary*\n' + clinicalSummary } });
+  }
+
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'section', fields: [
+    { type: 'mrkdwn', text: '*Pipeline*\n' + pipelineDisplay },
+    { type: 'mrkdwn', text: '*Stage*\n' + (stageDisplay || 'Unknown') }
+  ]});
+  blocks.push({ type: 'divider' });
+  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } });
+
+  return { fallback: 'Claude AI Assistant — Call Summary for ' + capitalizeFullName(contactName), blocks };
 }
 
 function buildEvalSlackBlocks(params) {
@@ -1023,17 +1036,45 @@ app.post('/webhook', async (req, res) => {
         ? (previousStageName || 'Unknown') + ' → ' + newStageName
         : newStageName + ' (no change)';
 
+    // Build plain language outcome for Slack
+    let slackOutcome = claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details';
+    if (claudeResult.follow_up_date) {
+      slackOutcome += ' — Follow-up: ' + claudeResult.follow_up_date + (claudeResult.follow_up_time ? ' @ ' + claudeResult.follow_up_time : '');
+    }
+
     const callBlocks = buildCallSlackBlocks({
       contactName: finalContactName || 'Unknown',
       contactPhone: contactPhone || 'Unknown',
       callTime: getTimestamp(),
       teamMember: claudeResult.team_member || 'Not identified in transcript',
-      outcome: claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details',
+      outcome: slackOutcome,
       pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
       stageDisplay,
-      redFlags: claudeResult.disqualifier_reason || 'None'
+      redFlags: claudeResult.red_flags_detail || claudeResult.disqualifier_reason || 'None',
+      clinicalSummary: claudeResult.clinical_summary || null,
+      isNewOpportunity
     });
     await sendSlackMessage(callBlocks);
+
+    // Create GHL calendar appointment for firm follow-up calls
+    if (claudeResult.follow_up_date && claudeResult.follow_up_time) {
+      const followUpPT = claudeResult.team_member && PT_CALENDARS[claudeResult.team_member]
+        ? claudeResult.team_member
+        : 'Jordan McCormack';
+      const followUpPTInfo = PT_CALENDARS[followUpPT] || PT_CALENDARS['Jordan McCormack'];
+      if (followUpPTInfo && contact) {
+        await createGHLCalendarAppointment(
+          contact.id,
+          followUpPTInfo.calendarId,
+          followUpPTInfo.ghlUserId,
+          finalContactName || 'Unknown',
+          followUpPT.split(' ')[0],
+          claudeResult.follow_up_date,
+          claudeResult.follow_up_time
+        );
+        console.log('Follow-up calendar appointment created for ' + followUpPT);
+      }
+    }
 
     await logEventToRedis({
       type: 'Call',
@@ -1388,7 +1429,7 @@ async function createGHLCalendarAppointment(contactId, calendarId, ptUserId, pat
     // Parse date and time into ISO format
     const dateTimeStr = `${dateStr} ${timeStr}`;
     const appointmentDate = new Date(dateTimeStr);
-    const endDate = new Date(appointmentDate.getTime() + 30 * 60000); // 30 min default
+    const endDate = new Date(appointmentDate.getTime() + 15 * 60000); // 15 min call block
 
     await axios.post(
       'https://services.leadconnectorhq.com/calendars/events',
