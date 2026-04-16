@@ -541,7 +541,7 @@ function buildCallSlackBlocks(params) {
 
   const score = parseInt(confidenceScore) || 0;
   const confidenceEmoji = score >= 90 ? ':large_green_circle:' : score >= 70 ? ':large_yellow_circle:' : ':red_circle:';
-  const confidenceText = confidenceEmoji + ' *Confidence: ' + score + '%* — ' + (confidenceReason || 'No reason provided');
+  const confidenceText = confidenceEmoji + ' *' + score + '% Confident in Transcript Interpretation*';
 
   const blocks = [
     { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
@@ -953,7 +953,7 @@ app.post('/webhook', async (req, res) => {
       try {
         activeOpportunity = await createGHLOpportunity(
           contact.id, defaultPipelineId, defaultStageId,
-          finalContactName || 'Incoming Call No Name Provided'
+          capitalizeFullName(finalContactName) || 'Incoming Call No Name Provided'
         );
         console.log('Created new lead opportunity: ' + activeOpportunity.id);
       } catch (err) {
