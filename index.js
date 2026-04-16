@@ -318,6 +318,10 @@ Past Patient Reactivation (FyMN20G4jUAhNiDmhRXS):
 
 IMPORTANT: Do NOT assign Day/Week stages. The system handles day and week progression automatically for voicemail and no-contact outcomes. Only assign the named outcome stages listed above.
 
+CRITICAL STAGE PROTECTION: If the current stage is any "Eval Scheduled" stage across any pipeline, you must NEVER change the stage regardless of the call outcome. Set action to NO_ACTION on stage if the contact is currently in Eval Scheduled. A note will still be added. This protects confirmation calls and pre-eval follow-ups from incorrectly moving the opportunity card backward.
+
+EVAL CANCELLATION EXCEPTION: The only exception is if the patient explicitly and clearly states they want to CANCEL their upcoming evaluation — not a routine follow-up visit, but the actual evaluation appointment. If this is unambiguous, set eval_cancelled to true in your response. The system will create a manual review task for the admin team rather than automatically changing the stage.
+
 DECISION RULES:
 
 1. CONVERSATION TYPE CHECK: Determine what type of call this was.
@@ -347,7 +351,7 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary of what happened and what the next step is — no jargon or pipeline codes","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent"}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary of what happened and what the next step is — no jargon or pipeline codes","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -356,11 +360,29 @@ async function getCallDetails(callId) {
   return response.data;
 }
 
+// Map Quo user IDs to team member names
+const QUO_USER_MAP = {
+  'USA0DVhDhZ': 'John Gan',
+  'USD3Kno24F': 'Shane Abbott',
+  'USHRRvAybv': 'Katy Vieira',
+  'USLnAV6kpl': 'Jordan McCormack',
+  'USnPowYhI2': 'TJ Aquino',
+  'USYIrAQecv': 'Chris Bostwick'
+};
+
 function extractContactPhone(callData) {
   const participants = callData.data?.participants || callData.participants || [];
   for (const p of participants) {
     if (!CLINIC_PHONE_NUMBERS.includes(p)) return p;
   }
+  return null;
+}
+
+function extractTeamMember(callData) {
+  const data = callData.data || callData;
+  // answeredBy is set for answered calls, userId is the initiator
+  const userId = data.answeredBy || data.userId || data.initiatedBy || null;
+  if (userId && QUO_USER_MAP[userId]) return QUO_USER_MAP[userId];
   return null;
 }
 
@@ -532,7 +554,13 @@ function capitalizeFullName(name) {
 }
 
 function buildCallSlackBlocks(params) {
-  const { contactName, contactPhone, callTime, teamMember, outcome, pipeline, stageDisplay, redFlags, clinicalSummary, isNewOpportunity, confidenceScore, confidenceReason } = params;
+  const { contactName, contactPhone, callTime, teamMember, outcome, pipeline, stageDisplay, redFlags, clinicalSummary, isNewOpportunity, confidenceScore, confidenceReason, opportunityId } = params;
+  const ghlUrl = opportunityId
+    ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + opportunityId
+    : null;
+  const nameDisplay = ghlUrl
+    ? '<' + ghlUrl + '|' + capitalizeFullName(contactName) + '>'
+    : capitalizeFullName(contactName);
   const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'null';
   const hasSummary = clinicalSummary && clinicalSummary !== 'null' && clinicalSummary !== 'None';
   const pipelineDisplay = isNewOpportunity
@@ -548,10 +576,10 @@ function buildCallSlackBlocks(params) {
     { type: 'section', text: { type: 'mrkdwn', text: confidenceText } },
     { type: 'divider' },
     { type: 'section', fields: [
-      { type: 'mrkdwn', text: '*Name*\n' + capitalizeFullName(contactName) },
+      { type: 'mrkdwn', text: '*Name*\n' + nameDisplay },
       { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') },
       { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
-      { type: 'mrkdwn', text: '*Team Member*\n' + (teamMember || 'Not identified') }
+      { type: 'mrkdwn', text: '*Team Member on Phone Call*\n' + (teamMember || 'Not identified') }
     ]},
     { type: 'divider' },
     { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See GHL for details') } }
@@ -574,15 +602,21 @@ function buildCallSlackBlocks(params) {
 }
 
 function buildEvalSlackBlocks(params) {
-  const { patientName, patientPhone, evalDate, evaluatingPT, planOfCarePT, outcome, stageDisplay, redFlags } = params;
+  const { patientName, patientPhone, evalDate, evaluatingPT, planOfCarePT, outcome, stageDisplay, redFlags, opportunityId } = params;
   const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'None identified.';
+  const ghlUrl = opportunityId
+    ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + opportunityId
+    : null;
+  const evalNameDisplay = ghlUrl
+    ? '<' + ghlUrl + '|' + capitalizeFullName(patientName) + '>'
+    : capitalizeFullName(patientName);
   return {
     fallback: 'Claude AI Assistant — Post-Eval Summary for ' + patientName,
     blocks: [
       { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Post-Eval Summary', emoji: true } },
       { type: 'divider' },
       { type: 'section', fields: [
-        { type: 'mrkdwn', text: '*Name*\n' + (patientName || 'Unknown') },
+        { type: 'mrkdwn', text: '*Name*\n' + evalNameDisplay },
         { type: 'mrkdwn', text: '*Phone*\n' + (patientPhone || 'Unknown') }
       ]},
       { type: 'divider' },
@@ -813,10 +847,13 @@ app.post('/webhook', async (req, res) => {
     console.log(`Processing call ${callId}, transcript length: ${transcript.length}`);
 
     let contactPhone = null;
+    let extractedTeamMember = null;
     try {
       const callDetails = await getCallDetails(callId);
       contactPhone = extractContactPhone(callDetails);
       console.log(`Contact phone: ${contactPhone}`);
+      extractedTeamMember = extractTeamMember(callDetails);
+      console.log('Team member from Quo:', extractedTeamMember || 'Not identified');
     } catch (err) {
       console.error('Failed to fetch call details:', err.message);
     }
@@ -1083,11 +1120,33 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
+    // Create eval cancellation review task if patient explicitly cancelled their eval
+    if (claudeResult.eval_cancelled === true && contact) {
+      try {
+        const cancelDueDate = new Date();
+        cancelDueDate.setDate(cancelDueDate.getDate() + 1);
+        const cancelNote = 'Patient explicitly stated they want to cancel their upcoming evaluation.\n' +
+          'Pipeline: ' + (PIPELINE_NAMES[finalPipelineId] || finalPipelineId) + '\n' +
+          'Current Stage: Eval Scheduled\n' +
+          'Action Required: Manually review and update the opportunity card in GHL based on whether they want to reschedule or fully cancel.\n' +
+          'Call Summary: ' + (claudeResult.note || '');
+        await createGHLTask(
+          contact.id,
+          'Eval Cancellation Request — ' + (finalContactName || 'Unknown'),
+          cancelDueDate,
+          cancelNote
+        );
+        console.log('Eval cancellation task created');
+      } catch (err) {
+        console.error('Failed to create eval cancellation task:', err.message);
+      }
+    }
+
     const callBlocks = buildCallSlackBlocks({
       contactName: finalContactName || 'Unknown',
       contactPhone: contactPhone || 'Unknown',
       callTime: getTimestamp(),
-      teamMember: claudeResult.team_member || 'Not identified in transcript',
+      teamMember: extractedTeamMember || claudeResult.team_member || 'Not identified',
       outcome: slackOutcome,
       pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
       stageDisplay,
@@ -1095,7 +1154,8 @@ app.post('/webhook', async (req, res) => {
       clinicalSummary: claudeResult.clinical_summary || null,
       isNewOpportunity,
       confidenceScore,
-      confidenceReason
+      confidenceReason,
+      opportunityId: activeOpportunity ? activeOpportunity.id : null
     });
     await sendSlackMessage(callBlocks);
 
@@ -2359,7 +2419,8 @@ app.post('/post-eval', async (req, res) => {
         planOfCarePT: planOfCarePT,
         outcome: claudeResult.evaluation_summary || claudeResult.next_steps || 'See email for full details',
         stageDisplay: evalStageDisplay,
-        redFlags: claudeResult.red_flags || 'None'
+        redFlags: claudeResult.red_flags || 'None',
+        opportunityId: customerOpp ? customerOpp.id : null
       });
       await sendSlackMessage(evalBlocks);
 
