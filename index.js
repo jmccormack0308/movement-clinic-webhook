@@ -30,7 +30,7 @@ const SLACK_USER_MAP = {
 };
 const TEAM_EMAIL = 'info@movementclinicpt.com';
 const JORDAN_EMAIL = 'jordan@movementclinicpt.com';
-const FROM_EMAIL = 'claude@movementclinicpt.com';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'claude@updates.movementclinicpt.com';
 const TASK_ASSIGNEE_ID = '3EuCG6xznkq3A2CeDhDQ';
 const TASK_TITLE = 'Claude Assistant: Follow up from previous conversation thread';
 
