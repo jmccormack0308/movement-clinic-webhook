@@ -26,7 +26,7 @@ const SLACK_USER_MAP = {
   'TJ Aquino': 'U0A9DL4RTKN',
   'Chris Bostwick': 'U091NMDKTFV',
   'John Gan': 'U07TJC6GZFG',
-  'Jordan McCormack': null
+  'Jordan McCormack': 'U061MSYGTGR'
 };
 const TEAM_EMAIL = 'info@movementclinicpt.com';
 const JORDAN_EMAIL = 'jordan@movementclinicpt.com';
@@ -840,7 +840,7 @@ async function updateClinicMetricsSheet() {
     // EVALS table starts at row 3, CONVERSIONS table starts at row 19 (after 14 data rows + header rows)
     // Based on layout: header row 1, EVALS rows 3-14, then gap, VISITS rows
     const evalsRow = MONTH_ROWS[month];
-    const conversionsRow = evalsRow + 16; // VISITS (Conversions) table offset
+    const conversionsRow = evalsRow + 19; // VISITS (Conversions) table: Jan=row 22, so row 3 + 19 = 22
 
     // Process each PT tab + clinic total
     for (const [ptKey, tabName] of Object.entries(PT_SHEET_TABS)) {
