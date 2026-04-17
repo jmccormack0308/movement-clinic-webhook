@@ -877,7 +877,43 @@ async function updateClinicMetricsSheet() {
     }
 
     console.log('Clinic metrics sheet updated for ' + monthNames[month] + ' ' + year);
-    await sendSlackError('✅ Monthly Metrics Updated', monthNames[month] + ' ' + year + ' data written to Clinic Metrics sheet successfully.');
+
+    // Send monthly summary email
+    const totalEvals = lastMonthRows.length;
+    const totalConverted = lastMonthRows.filter(r => r.outcome === 'Converted').length;
+    const totalPending = lastMonthRows.filter(r => r.outcome === 'Pending').length;
+    const totalLost = lastMonthRows.filter(r => r.outcome === 'Lost').length;
+    const convRate = totalEvals > 0 ? Math.round((totalConverted / totalEvals) * 100) : 0;
+
+    const ptBreakdown = Object.keys(PT_SHEET_TABS).filter(k => k !== 'clinic').map(pt => {
+      const ptRows = lastMonthRows.filter(r => r.evaluating_pt === pt || r.plan_of_care_pt === pt);
+      const ptConv = ptRows.filter(r => r.outcome === 'Converted').length;
+      return pt + ': ' + ptRows.length + ' evals, ' + ptConv + ' converted (' + (ptRows.length > 0 ? Math.round(ptConv/ptRows.length*100) : 0) + '%)';
+    }).join('\\n');
+
+    const objections = lastMonthRows
+      .filter(r => r.outcome === 'Lost' && r.objection_category)
+      .reduce((acc, r) => { acc[r.objection_category] = (acc[r.objection_category] || 0) + 1; return acc; }, {});
+    const objectionSummary = Object.entries(objections).sort((a,b) => b[1]-a[1]).map(([k,v]) => k + ': ' + v).join('\\n') || 'None';
+
+    const monthlyPrompt = 'Write a professional monthly evaluation results email for Movement Clinic Physical Therapy. Use inline styles, Montserrat font, max 600px. Include a header, summary stats, PT breakdown, and objection analysis. Return ONLY the HTML string.\\n\\nMONTH: ' + monthNames[month] + ' ' + year + '\\nTotal Evals: ' + totalEvals + '\\nConverted: ' + totalConverted + ' (' + convRate + '%)\\nPending: ' + totalPending + '\\nLost: ' + totalLost + '\\n\\nBy PT:\\n' + ptBreakdown + '\\n\\nTop Objections (Lost):\\n' + objectionSummary;
+
+    const aiResp = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      { model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages: [{ role: 'user', content: monthlyPrompt }] },
+      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
+    );
+    const monthlyHtml = aiResp.data.content[0].text.replace(/```html|```/g, '').trim();
+
+    await axios.post('https://api.resend.com/emails', {
+      from: FROM_EMAIL,
+      to: [JORDAN_EMAIL],
+      subject: 'Monthly Eval Report — ' + monthNames[month] + ' ' + year + ' (' + totalEvals + ' evals, ' + convRate + '% conversion)',
+      html: monthlyHtml
+    }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
+
+    console.log('Monthly summary email sent for ' + monthNames[month] + ' ' + year);
+    await sendSlackError('✅ Monthly Metrics Updated', monthNames[month] + ' ' + year + ' — ' + totalEvals + ' evals, ' + convRate + '% conversion. Sheet updated and email sent.');
   } catch (err) {
     const errMsg = err.message || String(err);
     console.error('Monthly metrics update failed:', errMsg);
