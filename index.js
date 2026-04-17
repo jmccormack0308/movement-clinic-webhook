@@ -785,6 +785,120 @@ function scheduleDailyDigest() {
 
 scheduleDailyDigest();
 
+async function updateClinicMetricsSheet() {
+  try {
+    const { google } = require('googleapis');
+    const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    if (!serviceAccountJson) {
+      console.error('GOOGLE_SERVICE_ACCOUNT_JSON not set');
+      await sendSlackError('Monthly Metrics Update', 'GOOGLE_SERVICE_ACCOUNT_JSON environment variable not configured');
+      return;
+    }
+
+    const serviceAccount = JSON.parse(serviceAccountJson);
+    const auth = new google.auth.GoogleAuth({
+      credentials: serviceAccount,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets']
+    });
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    // Get last month's date info
+    const now = new Date();
+    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const year = lastMonth.getFullYear();
+    const month = lastMonth.getMonth(); // 0-indexed
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    console.log('Updating metrics for ' + monthNames[month] + ' ' + year);
+
+    // Read last month's eval data from eval sheet
+    const csvUrl = 'https://docs.google.com/spreadsheets/d/' + EVAL_SHEET_ID + '/export?format=csv&gid=1955906194';
+    const csvResponse = await axios.get(csvUrl);
+    const lines = csvResponse.data.split('\n').filter(l => l.trim());
+    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+    const rows = lines.slice(1).map(line => {
+      const cols = line.split(',').map(c => c.replace(/"/g, '').trim());
+      const row = {};
+      headers.forEach((h, i) => { row[h] = cols[i] || ''; });
+      return row;
+    });
+
+    // Filter to last month by evaluation_date
+    const lastMonthRows = rows.filter(r => {
+      if (!r.evaluation_date) return false;
+      const d = new Date(r.evaluation_date);
+      return d.getMonth() === month && d.getFullYear() === year;
+    });
+
+    console.log('Found ' + lastMonthRows.length + ' evals for ' + monthNames[month] + ' ' + year);
+
+    const col = YEAR_COLS[year];
+    if (!col) {
+      console.error('Year ' + year + ' not in column map');
+      return;
+    }
+
+    // EVALS table starts at row 3, CONVERSIONS table starts at row 19 (after 14 data rows + header rows)
+    // Based on layout: header row 1, EVALS rows 3-14, then gap, VISITS rows
+    const evalsRow = MONTH_ROWS[month];
+    const conversionsRow = evalsRow + 16; // VISITS (Conversions) table offset
+
+    // Process each PT tab + clinic total
+    for (const [ptKey, tabName] of Object.entries(PT_SHEET_TABS)) {
+      let evalCount, conversionCount;
+
+      if (ptKey === 'clinic') {
+        evalCount = lastMonthRows.length;
+        conversionCount = lastMonthRows.filter(r => r.outcome === 'Converted').length;
+      } else {
+        const ptRows = lastMonthRows.filter(r =>
+          r.evaluating_pt === ptKey || r.plan_of_care_pt === ptKey
+        );
+        evalCount = ptRows.length;
+        conversionCount = ptRows.filter(r => r.outcome === 'Converted').length;
+      }
+
+      // Update EVALS cell
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: CLINIC_METRICS_SHEET_ID,
+        range: tabName + '!' + col + evalsRow,
+        valueInputOption: 'RAW',
+        resource: { values: [[evalCount]] }
+      });
+
+      // Update CONVERSIONS cell
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: CLINIC_METRICS_SHEET_ID,
+        range: tabName + '!' + col + conversionsRow,
+        valueInputOption: 'RAW',
+        resource: { values: [[conversionCount]] }
+      });
+
+      console.log(tabName + ': ' + evalCount + ' evals, ' + conversionCount + ' conversions');
+    }
+
+    console.log('Clinic metrics sheet updated for ' + monthNames[month] + ' ' + year);
+    await sendSlackError('✅ Monthly Metrics Updated', monthNames[month] + ' ' + year + ' data written to Clinic Metrics sheet successfully.');
+  } catch (err) {
+    const errMsg = err.message || String(err);
+    console.error('Monthly metrics update failed:', errMsg);
+    await sendSlackError('Monthly Metrics Update Failed', errMsg);
+  }
+}
+
+function scheduleMonthlyMetricsUpdate() {
+  const now = new Date();
+  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  // Next 1st of month at 8am PT
+  const target = new Date(pst.getFullYear(), pst.getMonth() + 1, 1, 8, 0, 0, 0);
+  if (pst >= target) target.setMonth(target.getMonth() + 1);
+  const msUntil = target - pst;
+  console.log('Monthly metrics update scheduled in ' + Math.round(msUntil / 60000) + ' minutes (1st of month 8am PT)');
+  setTimeout(async () => {
+    await updateClinicMetricsSheet();
+    setInterval(updateClinicMetricsSheet, 30 * 24 * 60 * 60 * 1000);
+  }, msUntil);
+}
+
 // Schedule weekly eval digest every Thursday at 8am PT
 function scheduleWeeklyEvalDigest() {
   const now = new Date();
@@ -867,6 +981,7 @@ async function sendWeeklyEvalDigest() {
 }
 
 scheduleWeeklyEvalDigest();
+scheduleMonthlyMetricsUpdate();
 
 // Keep GHL webhook for sheet logger and other non-email uses
 async function fireGHLSummaryWebhook(summaryData) {
@@ -1740,6 +1855,17 @@ app.get('/trigger-digest', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+app.get('/test-monthly-metrics', async (req, res) => {
+  res.status(200).json({ message: 'Monthly metrics update triggered — check Slack and Google Sheet in ~30 seconds' });
+  setImmediate(async () => {
+    try {
+      await updateClinicMetricsSheet();
+    } catch (err) {
+      console.error('Test monthly metrics failed:', err.message);
+    }
+  });
+});
+
 app.get('/test-weekly-digest', async (req, res) => {
   res.status(200).json({ message: 'Weekly eval digest triggered — check jordan@ inbox in ~30 seconds' });
   setImmediate(async () => {
@@ -1780,6 +1906,22 @@ const GHL_SHEET_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlq
 const CALL_ACTIVITY_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/98f7f9a2-46b1-482a-9fa0-fa56e28300c0';
 const CALL_ACTIVITY_SHEET_ID = '1Vllfbhf2ZkFOSCZYwW6qxeQn6B2OYEmfdi3Cl_l42Io';
 const EVAL_SHEET_ID = '1z6Y8eRaTNtiwJySGplMUaD-yJwq4M6vkQl2IzM3tJsI';
+const CLINIC_METRICS_SHEET_ID = '1ej2f-8W7pE8ydVR6TOOdP246Zmm9hU974FJL0cJJ8sE';
+
+// Map PT names to their sheet tab names
+const PT_SHEET_TABS = {
+  'clinic': 'Clinic Metrics',
+  'Jordan McCormack': 'Jordan McCormack Metrics',
+  'Chris Bostwick': 'Chris Bostwick Metrics',
+  'TJ Aquino': 'TJ Aquino Metrics',
+  'John Gan': 'John Gan Metrics'
+};
+
+// Month rows in the sheet (row 3 = Jan, row 4 = Feb, etc. based on header rows)
+const MONTH_ROWS = { 0: 3, 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 10: 13, 11: 14 };
+
+// Year columns (B=2021, C=2022, D=2023, E=2024, F=2025, G=2026)
+const YEAR_COLS = { 2021: 'B', 2022: 'C', 2023: 'D', 2024: 'E', 2025: 'F', 2026: 'G' };
 const GHL_CALL_LOG_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/98f7f9a2-46b1-482a-9fa0-fa56e28300c0';
 const CALL_SHEET_ID = '1Vllfbhf2ZkFOSCZYwW6qxeQn6B2OYEmfdi3Cl_l42Io';
 const REHAB_ESSENTIALS_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/e2b1cd03-f854-4c7b-a156-44b854ba13bf';
