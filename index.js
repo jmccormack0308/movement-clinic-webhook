@@ -824,10 +824,12 @@ async function sendWeeklyEvalDigest() {
     const oneWeekAgo = new Date();
     oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
     const weekRows = rows.filter(r => {
-      if (!r.evaluation_date) return false;
+      if (!r.evaluation_date) return true; // include rows with no date
       const d = new Date(r.evaluation_date);
+      if (isNaN(d.getTime())) return true; // include rows with unparseable dates
       return d >= oneWeekAgo;
     });
+    console.log('Weekly digest: total rows in sheet:', rows.length, '— rows in last 7 days:', weekRows.length);
 
     if (weekRows.length === 0) {
       console.log('No evals in last 7 days for weekly digest');
