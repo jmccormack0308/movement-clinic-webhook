@@ -1212,45 +1212,7 @@ app.post('/webhook', async (req, res) => {
 
     console.log(`Processing call ${callId}, transcript length: ${transcript.length}`);
 
-    // PRE-SCREEN: Quick Claude check to determine call type before pipeline actions
-    let isNonLeadCall = false;
-    let skipContactCreation = false;
-    try {
-      const preScreenResponse = await axios.post(
-        'https://api.anthropic.com/v1/messages',
-        {
-          model: 'claude-haiku-4-5-20251001',
-          max_tokens: 100,
-          messages: [{
-            role: 'user',
-            content: `You are a call classifier for a physical therapy clinic. Read this transcript and respond with ONLY one of these three words:
-
-- "LEAD" — caller is a potential patient interested in PT, evaluations, or assessments
-- "REFERRAL" — caller is a physician office coordinating patient care, a gym or fitness studio exploring collaboration, or another healthcare provider with a professional relationship purpose
-- "SKIP" — caller is a vendor, sales rep, job applicant, insurance company, law office, or anyone with no relevant relationship to the clinic
-
-TRANSCRIPT:
-${transcript}
-
-Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
-          }]
-        },
-        { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
-      );
-      const preScreenResult = preScreenResponse.data.content[0].text.trim().toUpperCase();
-      if (preScreenResult === 'SKIP') {
-        console.log('Pre-screen: Vendor/sales/interview call — skipping entirely, no contact created');
-        return;
-      } else if (preScreenResult === 'REFERRAL') {
-        isNonLeadCall = true;
-        console.log('Pre-screen: Referral source call — contact will be created, no pipeline actions');
-      } else {
-        console.log('Pre-screen: Lead call confirmed — full processing');
-      }
-    } catch (err) {
-      console.error('Pre-screen failed, proceeding with full analysis:', err.message);
-    }
-
+    // Get call details and contact FIRST — before pre-screen
     let contactPhone = null;
     let extractedTeamMember = null;
     try {
@@ -1274,6 +1236,61 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       }
     }
 
+    // Check if this contact already has an existing lead opportunity
+    // If yes — skip pre-screen entirely, always process as lead (outbound calls to existing leads)
+    let hasExistingLeadOpp = false;
+    if (contact) {
+      try {
+        const existingOpps = await getAllContactOpportunities(contact.id);
+        hasExistingLeadOpp = !!findLeadOpportunity(existingOpps);
+      } catch (err) {
+        console.error('Failed to check existing opportunities:', err.message);
+      }
+    }
+
+    // PRE-SCREEN: Only run for new/unknown contacts
+    let isNonLeadCall = false;
+    if (hasExistingLeadOpp) {
+      console.log('Existing lead opportunity found — bypassing pre-screen, processing as lead');
+    } else {
+      try {
+        const preScreenResponse = await axios.post(
+          'https://api.anthropic.com/v1/messages',
+          {
+            model: 'claude-haiku-4-5-20251001',
+            max_tokens: 100,
+            messages: [{
+              role: 'user',
+              content: `You are a call classifier for a physical therapy clinic. Read this transcript and respond with ONLY one of these three words:
+
+- "LEAD" — caller is a potential patient interested in PT, evaluations, or assessments
+- "REFERRAL" — caller is a physician office coordinating patient care, a gym or fitness studio exploring collaboration, or another healthcare provider with a professional relationship purpose
+- "SKIP" — caller is a vendor, sales rep, job applicant, insurance company, law office, or anyone with no relevant relationship to the clinic
+
+TRANSCRIPT:
+${transcript}
+
+Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
+            }]
+          },
+          { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
+        );
+        const preScreenResult = preScreenResponse.data.content[0].text.trim().toUpperCase();
+        if (preScreenResult === 'SKIP') {
+          console.log('Pre-screen: Vendor/sales/interview call — skipping entirely, no contact created');
+          return;
+        } else if (preScreenResult === 'REFERRAL') {
+          isNonLeadCall = true;
+          console.log('Pre-screen: Referral source call — contact will be created, no pipeline actions');
+        } else {
+          console.log('Pre-screen: Lead call confirmed — full processing');
+        }
+      } catch (err) {
+        console.error('Pre-screen failed, proceeding with full analysis:', err.message);
+      }
+    }
+
+    // Create contact if not found yet (only for leads and referrals that passed pre-screen)
     if (!contact) {
       try {
         const result = await createOrFindGHLContact(contactPhone || '+10000000000', 'Incoming Call No Name Provided');
@@ -1289,7 +1306,7 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
     const contactName = `${contact.firstName || ''} ${contact.lastName || ''}`.trim();
     console.log(`Contact: ${contactName} (${contact.id})`);
 
-    // If non-lead call — contact is created above but stop here, no pipeline/opportunity actions
+    // If non-lead call — contact is saved but no pipeline/opportunity actions
     if (isNonLeadCall) {
       console.log('Non-lead call — contact saved, no pipeline or opportunity actions taken');
       return;
