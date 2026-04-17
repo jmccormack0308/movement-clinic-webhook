@@ -896,14 +896,53 @@ async function updateClinicMetricsSheet() {
       .reduce((acc, r) => { acc[r.objection_category] = (acc[r.objection_category] || 0) + 1; return acc; }, {});
     const objectionSummary = Object.entries(objections).sort((a,b) => b[1]-a[1]).map(([k,v]) => k + ': ' + v).join('\\n') || 'None';
 
-    const monthlyPrompt = 'Write a professional monthly evaluation results email for Movement Clinic Physical Therapy. Use inline styles, Montserrat font, max 600px. Include a header, summary stats, PT breakdown, and objection analysis. Return ONLY the HTML string.\\n\\nMONTH: ' + monthNames[month] + ' ' + year + '\\nTotal Evals: ' + totalEvals + '\\nConverted: ' + totalConverted + ' (' + convRate + '%)\\nPending: ' + totalPending + '\\nLost: ' + totalLost + '\\n\\nBy PT:\\n' + ptBreakdown + '\\n\\nTop Objections (Lost):\\n' + objectionSummary;
+    // Build hardcoded PT rows — name on its own line, stats below
+    const ptColors = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6'];
+    const ptRowsHtml = Object.keys(PT_SHEET_TABS).filter(k => k !== 'clinic').map((pt, idx) => {
+      const ptData = lastMonthRows.filter(r => r.evaluating_pt === pt || r.plan_of_care_pt === pt);
+      const ptConv = ptData.filter(r => r.outcome === 'Converted').length;
+      const ptRate = ptData.length > 0 ? Math.round(ptConv / ptData.length * 100) : 0;
+      return '<div style="border-left:4px solid ' + ptColors[idx % ptColors.length] + ';background:#f8fafc;border-radius:0 8px 8px 0;padding:14px 20px;margin-bottom:10px;">' +
+        '<div style="font-size:15px;font-weight:700;color:#1e293b;margin-bottom:6px;">' + pt + '</div>' +
+        '<div style="font-size:13px;color:#64748b;">' + ptData.length + ' evals &nbsp;&bull;&nbsp; ' + ptConv + ' converted &nbsp;&bull;&nbsp; ' + ptRate + '% conversion rate</div>' +
+        '</div>';
+    }).join('');
 
-    const aiResp = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      { model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages: [{ role: 'user', content: monthlyPrompt }] },
-      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
-    );
-    const monthlyHtml = aiResp.data.content[0].text.replace(/```html|```/g, '').trim();
+    const objectionRowsHtml = Object.entries(objections).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
+      '<tr><td style="padding:8px 12px;font-size:13px;color:#334155;border-bottom:1px solid #e2e8f0;">' + k + '</td>' +
+      '<td style="padding:8px 12px;font-size:13px;font-weight:700;color:#334155;text-align:right;border-bottom:1px solid #e2e8f0;">' + v + '</td></tr>'
+    ).join('');
+
+    const statCard = (value, label, color) =>
+      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:20px 12px;text-align:center;border-left:4px solid ' + color + ';">' +
+      '<div style="font-size:32px;font-weight:700;color:#1e293b;">' + value + '</div>' +
+      '<div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:6px;">' + label + '</div>' +
+      '</div></td>';
+
+    const monthlyHtml = '<!DOCTYPE html><html><body style="margin:0;padding:20px 0;background:#f1f5f9;font-family:Montserrat,Segoe UI,Arial,sans-serif;">' +
+      '<div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">' +
+      '<div style="background:#1e3a5f;padding:40px 32px;text-align:center;">' +
+      '<div style="font-size:22px;font-weight:700;color:#ffffff;margin-bottom:8px;">Movement Clinic Physical Therapy</div>' +
+      '<div style="font-size:14px;color:#93c5fd;">Monthly Evaluation Results — ' + monthNames[month] + ' ' + year + '</div>' +
+      '</div>' +
+      '<div style="padding:32px;">' +
+      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#94a3b8;margin-bottom:16px;">Summary Statistics</div>' +
+      '<table style="width:100%;border-collapse:collapse;margin-bottom:32px;"><tr>' +
+      statCard(totalEvals, 'Total Evals', '#2563eb') +
+      statCard(totalConverted + ' (' + convRate + '%)', 'Converted', '#10b981') +
+      statCard(totalPending, 'Pending', '#f59e0b') +
+      statCard(totalLost, 'Lost', '#ef4444') +
+      '</tr></table>' +
+      '<div style="font-size:16px;font-weight:700;color:#1e293b;margin-bottom:16px;">Performance by Physical Therapist</div>' +
+      ptRowsHtml +
+      '<div style="margin-top:28px;background:#f8fafc;border-radius:8px;padding:20px;">' +
+      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#94a3b8;margin-bottom:12px;">Top Objections Analysis</div>' +
+      (objectionRowsHtml
+        ? '<table style="width:100%;border-collapse:collapse;">' + objectionRowsHtml + '</table>'
+        : '<div style="font-size:13px;color:#94a3b8;font-style:italic;">No lost evaluations to analyze this period.</div>') +
+      '</div>' +
+      '<div style="margin-top:24px;text-align:center;font-size:11px;color:#94a3b8;">Generated by Movement Clinic Claude AI &nbsp;&bull;&nbsp; ' + monthNames[month] + ' ' + year + '</div>' +
+      '</div></div></body></html>';
 
     await axios.post('https://api.resend.com/emails', {
       from: FROM_EMAIL,
