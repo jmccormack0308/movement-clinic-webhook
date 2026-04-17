@@ -702,19 +702,48 @@ function buildEvalSlackBlocks(params) {
   };
 }
 
-// Send daily digest email via Resend
+// Send daily digest email pulling from Google Sheet via Sheets API
 async function sendDailyDigest() {
   try {
-    if (!dailyEventLog || dailyEventLog.length === 0) {
+    const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' });
+    const dateLabel = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+    const SHEET_ID = CALL_ACTIVITY_SHEET_ID;
+
+    // Fetch today's rows from Google Sheet via public CSV export
+    // Sheet must be published: File → Share → Publish to web → CSV
+    let sheetRows = [];
+    try {
+      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&id=' + SHEET_ID;
+      const sheetResponse = await axios.get(csvUrl);
+      const lines = sheetResponse.data.split('\n').filter(l => l.trim());
+      const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+      // Filter to today's rows based on timestamp column
+      for (let i = 1; i < lines.length; i++) {
+        const cols = lines[i].split(',').map(c => c.replace(/"/g, '').trim());
+        const row = {};
+        headers.forEach((h, idx) => { row[h] = cols[idx] || ''; });
+        if (row['timestamp'] && row['timestamp'].includes(today.split('/').slice(0,2).join('/'))) {
+          sheetRows.push(row);
+        }
+      }
+    } catch (sheetErr) {
+      console.error('Failed to fetch Google Sheet:', sheetErr.message);
+      // Fall back to in-memory log
+      sheetRows = dailyEventLog.map(e => ({
+        timestamp: e.timestamp, contact_name: e.contact,
+        outcome: e.summary, pipeline: '', new_stage: '', confidence_score: '', red_flags: ''
+      }));
+    }
+
+    if (!sheetRows || sheetRows.length === 0) {
       console.log('No events to digest today');
+      await sendSlackError('Daily Digest', 'No call activity logged today — digest not sent.');
       return;
     }
 
-    const events = [...dailyEventLog];
-    const dateLabel = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-
-    // Have Claude write the digest email
-    const digestPrompt = 'You are writing a daily operations digest email for Movement Clinic Physical Therapy. Summarize the following events that Claude processed today into a clean, well-organized HTML email. Group by type: calls first, then evaluations. For each event include the key action taken. Be concise.\n\nDate: ' + dateLabel + '\n\nEvents:\n' + events.map((e, i) => (i + 1) + '. [' + e.type + '] ' + e.contact + ' — ' + e.summary + ' (' + e.timestamp + ')').join('\n') + '\n\nWrite a professional HTML email with inline styles, Montserrat font, max-width 600px. Include:\n- Header with date and total event count\n- Grouped sections for Calls and Evaluations\n- Brief summary row per event\n- Footer note\n\nReturn ONLY the HTML string, no JSON wrapper, no markdown.';
+    const digestPrompt = 'You are writing a daily operations digest email for Movement Clinic Physical Therapy. Summarize these call and pipeline activity records from today into a clean HTML email.\n\nDate: ' + dateLabel + '\nTotal Events: ' + sheetRows.length + '\n\nRecords:\n' +
+      sheetRows.map((r, i) => (i + 1) + '. ' + (r['contact_name'] || 'Unknown') + ' | ' + (r['outcome'] || '') + ' | Pipeline: ' + (r['pipeline'] || '') + ' → ' + (r['new_stage'] || '') + ' | Confidence: ' + (r['confidence_score'] || '') + ' | Flags: ' + (r['red_flags'] || 'None')).join('\n') +
+      '\n\nWrite a professional HTML email with inline styles, Montserrat font, max-width 600px:\n- Header with date and event count\n- Table with columns: Contact, Outcome, Pipeline, Stage, Confidence, Red Flags\n- Footer\n\nReturn ONLY the HTML string, no markdown.';
 
     const response = await axios.post(
       'https://api.anthropic.com/v1/messages',
@@ -727,18 +756,15 @@ async function sendDailyDigest() {
     await axios.post('https://api.resend.com/emails', {
       from: FROM_EMAIL,
       to: [JORDAN_EMAIL],
-      subject: 'Daily Operations Digest — ' + dateLabel + ' (' + events.length + ' events)',
+      subject: 'Daily Operations Digest — ' + dateLabel + ' (' + sheetRows.length + ' events)',
       html: digestHtml
-    }, {
-      headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' }
-    });
+    }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
 
-    console.log('Daily digest sent — ' + events.length + ' events');
-
-    // Clear today's events after sending
+    console.log('Daily digest sent — ' + sheetRows.length + ' events');
     dailyEventLog.length = 0;
   } catch (err) {
     console.error('Daily digest failed:', err.response?.data || err.message);
+    await sendSlackError('Daily Digest Failed', err.message || 'Unknown error');
   }
 }
 
@@ -758,6 +784,87 @@ function scheduleDailyDigest() {
 }
 
 scheduleDailyDigest();
+
+// Schedule weekly eval digest every Thursday at 8am PT
+function scheduleWeeklyEvalDigest() {
+  const now = new Date();
+  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const target = new Date(pst);
+  // Find next Thursday (day 4)
+  const daysUntilThursday = (4 - pst.getDay() + 7) % 7 || 7;
+  target.setDate(pst.getDate() + daysUntilThursday);
+  target.setHours(8, 0, 0, 0);
+  const msUntil = target - pst;
+  console.log('Weekly eval digest scheduled in ' + Math.round(msUntil / 60000) + ' minutes (Thursday 8am PT)');
+  setTimeout(async () => {
+    await sendWeeklyEvalDigest();
+    setInterval(sendWeeklyEvalDigest, 7 * 24 * 60 * 60 * 1000);
+  }, msUntil);
+}
+
+async function sendWeeklyEvalDigest() {
+  try {
+    const csvUrl = 'https://docs.google.com/spreadsheets/d/' + EVAL_SHEET_ID + '/export?format=csv&gid=1955906194';
+    const csvResponse = await axios.get(csvUrl);
+    const lines = csvResponse.data.split('\n').filter(l => l.trim());
+    if (lines.length < 2) {
+      console.log('No eval data for weekly digest');
+      return;
+    }
+
+    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
+    const rows = lines.slice(1).map(line => {
+      const cols = line.split(',').map(c => c.replace(/"/g, '').trim());
+      const row = {};
+      headers.forEach((h, i) => { row[h] = cols[i] || ''; });
+      return row;
+    });
+
+    // Filter to last 7 days
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    const weekRows = rows.filter(r => {
+      if (!r.evaluation_date) return false;
+      const d = new Date(r.evaluation_date);
+      return d >= oneWeekAgo;
+    });
+
+    if (weekRows.length === 0) {
+      console.log('No evals in last 7 days for weekly digest');
+      return;
+    }
+
+    const total = weekRows.length;
+    const converted = weekRows.filter(r => r.outcome === 'Converted').length;
+    const pending = weekRows.filter(r => r.outcome === 'Pending').length;
+    const lost = weekRows.filter(r => r.outcome === 'Lost').length;
+    const conversionRate = Math.round((converted / total) * 100);
+
+    const digestPrompt = 'You are writing a weekly evaluation results report for Movement Clinic Physical Therapy. Write a clean HTML email summarizing this weeks evaluation data.\n\nDATA:\nTotal Evals: ' + total + '\nConverted: ' + converted + ' (' + conversionRate + '%)\nPending: ' + pending + '\nLost: ' + lost + '\n\nEval Details:\n' + weekRows.map(r => '- ' + (r.first_name || '') + ' ' + (r.last_name || '') + ' | PT: ' + (r.evaluating_pt || '') + ' | Outcome: ' + (r.outcome || '') + (r.objection_category ? ' | Objection: ' + r.objection_category : '')).join('\n') + '\n\nWrite a professional HTML email with inline styles, Montserrat font, max 600px. Include: header with week dates, summary stats section, conversion rate, breakdown by PT, top objections from lost evals. Return ONLY the HTML string.';
+
+    const aiResponse = await axios.post(
+      'https://api.anthropic.com/v1/messages',
+      { model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages: [{ role: 'user', content: digestPrompt }] },
+      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
+    );
+    const digestHtml = aiResponse.data.content[0].text.replace(/\`\`\`html|\`\`\`/g, '').trim();
+
+    const weekLabel = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'long', day: 'numeric', year: 'numeric' });
+    await axios.post('https://api.resend.com/emails', {
+      from: FROM_EMAIL,
+      to: [JORDAN_EMAIL],
+      subject: 'Weekly Eval Report — Week of ' + weekLabel + ' (' + total + ' evals, ' + conversionRate + '% conversion)',
+      html: digestHtml
+    }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
+
+    console.log('Weekly eval digest sent — ' + total + ' evals, ' + conversionRate + '% conversion');
+  } catch (err) {
+    console.error('Weekly eval digest failed:', err.response?.data || err.message);
+    await sendSlackError('Weekly Eval Digest Failed', err.message);
+  }
+}
+
+scheduleWeeklyEvalDigest();
 
 // Keep GHL webhook for sheet logger and other non-email uses
 async function fireGHLSummaryWebhook(summaryData) {
@@ -1392,6 +1499,46 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       summary: (claudeResult.outcome || 'Unknown') + ' — ' + (PIPELINE_NAMES[finalPipelineId] || '') + (stageChanged ? ' — Stage: ' + (STAGE_NAMES[previousStageId] || '') + ' to ' + (STAGE_NAMES[finalStageId] || '') : '')
     });
 
+    // Fire call activity log to Google Sheet via GHL workflow
+    try {
+      await axios.post(CALL_ACTIVITY_WEBHOOK, {
+        timestamp: getTimestamp(),
+        contact_name: String(capitalizeFullName(finalContactName) || 'Unknown'),
+        contact_phone: String(contactPhone || 'Unknown'),
+        team_member: String(extractedTeamMember || claudeResult.team_member || 'Not identified'),
+        outcome: String(claudeResult.plain_language_outcome || claudeResult.note || ''),
+        pipeline: String(PIPELINE_NAMES[finalPipelineId] || finalPipelineId || ''),
+        previous_stage: String(previousStageName || 'No previous stage'),
+        new_stage: String(newStageName || ''),
+        confidence_score: String(confidenceScore || '') + '%',
+        red_flags: String(claudeResult.red_flags_detail || claudeResult.disqualifier_reason || 'None'),
+        call_summary: String(claudeResult.note || '')
+      }, { headers: { 'Content-Type': 'application/json' } });
+      console.log('Call activity log fired to sheet');
+    } catch (err) {
+      console.error('Call activity log failed:', err.message);
+    }
+
+    // Fire call activity log to Google Sheet via GHL webhook
+    try {
+      await axios.post(GHL_CALL_LOG_WEBHOOK, {
+        timestamp: getTimestamp(),
+        contact_name: String(capitalizeFullName(finalContactName) || 'Unknown'),
+        contact_phone: String(contactPhone || 'Unknown'),
+        team_member: String(extractedTeamMember || claudeResult.team_member || 'Not identified'),
+        outcome: String(claudeResult.plain_language_outcome || claudeResult.note || 'Unknown'),
+        pipeline: String(PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown'),
+        previous_stage: String(previousStageName || 'No previous stage'),
+        new_stage: String(newStageName || 'Unknown'),
+        confidence_score: String(confidenceScore || 0) + '%',
+        red_flags: String(claudeResult.red_flags_detail || claudeResult.disqualifier_reason || 'None'),
+        call_summary: String(claudeResult.note || '')
+      }, { headers: { 'Content-Type': 'application/json' } });
+      console.log('Call activity log fired to Google Sheet');
+    } catch (err) {
+      console.error('Call log webhook failed:', err.message);
+    }
+
     console.log(`Successfully processed call ${callId}: ${claudeResult.outcome}`);
 
     } catch (error) {
@@ -1583,7 +1730,25 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// Manual digest trigger for testing
+app.get('/trigger-digest', async (req, res) => {
+  console.log('Manual digest trigger fired');
+  res.status(200).json({ message: 'Digest triggered — check your email in ~30 seconds' });
+  await sendDailyDigest();
+});
+
 const PORT = process.env.PORT || 3000;
+app.get('/test-weekly-digest', async (req, res) => {
+  res.status(200).json({ message: 'Weekly eval digest triggered — check jordan@ inbox in ~30 seconds' });
+  setImmediate(async () => {
+    try {
+      await sendWeeklyEvalDigest();
+    } catch (err) {
+      console.error('Test digest failed:', err.message);
+    }
+  });
+});
+
 app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on port ${PORT}`); });
 
 // ============================================================
@@ -1610,6 +1775,11 @@ const CONTINUITY_PIPELINE_ID = 'UwFUs0w3nmj6k0f1EEXm';
 const CONTINUITY_PURCHASED_STAGE_ID = '63d7e07f-e3cc-4931-9d2e-0f67028bd2be';
 
 const GHL_SHEET_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/013d41b5-f370-4422-9353-3f7d90b21890';
+const CALL_ACTIVITY_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/98f7f9a2-46b1-482a-9fa0-fa56e28300c0';
+const CALL_ACTIVITY_SHEET_ID = '1Vllfbhf2ZkFOSCZYwW6qxeQn6B2OYEmfdi3Cl_l42Io';
+const EVAL_SHEET_ID = '1z6Y8eRaTNtiwJySGplMUaD-yJwq4M6vkQl2IzM3tJsI';
+const GHL_CALL_LOG_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/98f7f9a2-46b1-482a-9fa0-fa56e28300c0';
+const CALL_SHEET_ID = '1Vllfbhf2ZkFOSCZYwW6qxeQn6B2OYEmfdi3Cl_l42Io';
 const REHAB_ESSENTIALS_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/e2b1cd03-f854-4c7b-a156-44b854ba13bf';
 const EVAL_TEAM_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/iXwd91Z53dXc3hGrbDjv';
 const EVAL_JORDAN_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/aeecdec8-5dbf-4bfe-9bd4-aa33f5962589';
@@ -2478,28 +2648,32 @@ app.post('/post-eval', async (req, res) => {
     // Google Sheet logger webhook
     try {
       await axios.post(GHL_SHEET_WEBHOOK, {
-        timestamp: new Date().toISOString(),
-        date_added: new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }),
-        patient_first_name,
-        patient_last_name,
-        patient_email,
-        patient_phone,
-        evaluating_pt,
-        plan_of_care_pt: planOfCarePT,
+        timestamp: getTimestamp(),
+        first_name: String(patient_first_name || ''),
+        last_name: String(patient_last_name || ''),
+        email: String(patient_email || ''),
+        phone: String(patient_phone || ''),
+        evaluating_pt: String(evaluating_pt || ''),
+        plan_of_care_pt: String(planOfCarePT || ''),
+        outcome: String(outcome || ''),
+        stage: String(stage || 'N/A'),
         evaluation_date: new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }),
-        conversion_outcome: outcome,
-        stage_purchase: stage || 'N/A',
-        objection_category: claudeResult.objection_category || '',
-        objection_detail: claudeResult.objection_detail || '',
-        next_steps: claudeResult.next_steps || '',
-        follow_up_visit_date: claudeResult.follow_up_visit_date || '',
-        follow_up_call_date: claudeResult.follow_up_call_date || '',
-        follow_up_call_time: claudeResult.follow_up_call_time || '',
-        physician_name: claudeResult.physician_name || '',
-        physician_office: claudeResult.physician_office || '',
-        rehab_essentials,
-        send_checkin_text: send_checkin,
-        checkin_text: checkin_text || ''
+        rehab_essentials: String(rehab_essentials || ''),
+        send_checkin_text_question: String(send_checkin || ''),
+        checkin_text_sent: String(send_checkin || ''),
+        payment_method: String(claudeResult.payment_method || 'Unclear from transcript'),
+        pending_subtype: String(claudeResult.pending_subtype || ''),
+        follow_up_visit_date: String(claudeResult.follow_up_visit_date || ''),
+        follow_up_phone_call_date: String(claudeResult.follow_up_call_date || ''),
+        follow_up_phone_call_time: String(claudeResult.follow_up_call_time || ''),
+        objection_category: String(claudeResult.objection_category || ''),
+        objection_detail: String(claudeResult.objection_detail || ''),
+        evaluation_summary: String(claudeResult.evaluation_summary || ''),
+        next_steps: String(claudeResult.next_steps || ''),
+        red_flags: String(claudeResult.red_flags || 'None identified.'),
+        coaching_notes: String(claudeResult.coaching_notes || ''),
+        calendar_appointment_created: String(claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date ? 'Yes' : 'No'),
+        continuity_pipeline_created: String(stage === 'Stage 2' ? 'Yes' : 'No')
       }, { headers: { 'Content-Type': 'application/json' } });
       console.log('Sheet logger webhook fired');
     } catch (err) {
