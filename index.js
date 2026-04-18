@@ -2170,33 +2170,42 @@ RETURN ONLY valid JSON with no preamble or markdown:
   "red_flags": "None identified."
 }`;
 
-// Send SMS immediately if within 8am-6pm PT, otherwise schedule for next 8am PT
-async function sendSMSWithinHours(toPhone, message) {
-  const now = new Date();
-  const ptTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+// Send SMS at next available 8am-6pm PT window, with optional delay in hours
+async function sendSMSWithinHours(toPhone, message, delayHours = 0) {
+  const scheduleAt = new Date(Date.now() + delayHours * 60 * 60 * 1000);
+  const ptTime = new Date(scheduleAt.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
   const hour = ptTime.getHours();
 
-  if (hour >= 8 && hour < 18) {
-    // Within hours — send immediately
+  if (delayHours === 0 && hour >= 8 && hour < 18) {
+    // No delay and within hours — send immediately
     await sendQuoSMS(toPhone, message);
     console.log('SMS sent immediately (within business hours)');
-  } else {
-    // Outside hours — schedule for next 8am PT
-    const nextMorning = new Date(ptTime);
-    if (hour >= 18) nextMorning.setDate(nextMorning.getDate() + 1);
-    nextMorning.setHours(8, 0, 0, 0);
-    const msUntil = nextMorning - ptTime;
-    console.log('SMS scheduled for 8am PT (' + Math.round(msUntil / 60000) + ' minutes from now)');
-    setTimeout(async () => {
-      try {
-        await sendQuoSMS(toPhone, message);
-        console.log('Scheduled SMS sent at 8am PT to ' + toPhone);
-      } catch (err) {
-        console.error('Scheduled SMS failed:', err.message);
-        await sendSlackError('Scheduled SMS Failed', 'To: ' + toPhone + ' — ' + err.message);
-      }
-    }, msUntil);
+    return;
   }
+
+  // Find next valid 8am-6pm PT window after the delay
+  const sendTime = new Date(ptTime);
+  if (delayHours > 0) {
+    // After delay, check if still within hours
+    if (hour < 8) sendTime.setHours(8, 0, 0, 0);
+    else if (hour >= 18) { sendTime.setDate(sendTime.getDate() + 1); sendTime.setHours(8, 0, 0, 0); }
+  } else {
+    // No delay but outside hours — next 8am
+    if (hour >= 18) { sendTime.setDate(sendTime.getDate() + 1); }
+    sendTime.setHours(8, 0, 0, 0);
+  }
+
+  const msUntil = sendTime - ptTime;
+  console.log('SMS scheduled for ' + sendTime.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }) + ' PT (' + Math.round(msUntil / 60000) + ' minutes from now)');
+  setTimeout(async () => {
+    try {
+      await sendQuoSMS(toPhone, message);
+      console.log('Scheduled SMS sent to ' + toPhone);
+    } catch (err) {
+      console.error('Scheduled SMS failed:', err.message);
+      await sendSlackError('Scheduled SMS Failed', 'To: ' + toPhone + ' — ' + err.message);
+    }
+  }, msUntil);
 }
 
 async function sendQuoSMS(toPhone, message) {
@@ -2720,6 +2729,11 @@ app.get('/post-eval', (req, res) => {
       document.getElementById('checkinTextBox').classList.toggle('visible', this.value === 'Yes');
     });
   });
+  // Show on load if pre-selected
+  const checkinSelected = document.querySelector('input[name="send_checkin"]:checked');
+  if (checkinSelected && checkinSelected.value === 'Yes') {
+    document.getElementById('checkinTextBox').classList.add('visible');
+  }
 
   // Form submission
   // Pre-fill form from URL parameters (set by Slack deals board button)
@@ -2989,14 +3003,19 @@ app.post('/post-eval', async (req, res) => {
       }
     }
 
-    // Send check-in text via Quo if requested (respects 8am-6pm PT window)
-    if (send_checkin === 'Yes' && checkin_text && checkin_text.trim()) {
+    // Check-in text is handled by GHL workflow (48hr delay) — Railway fires the trigger webhook only
+    // The GHL workflow handles the actual Quo SMS send with 48hr wait built in
+    if (send_checkin === 'Yes' && checkin_text && checkin_text.trim() && process.env.CHECKIN_WEBHOOK) {
       try {
-        await sendSMSWithinHours(patient_phone, checkin_text.trim());
-        console.log('Check-in text sent or scheduled for ' + patient_phone);
+        await axios.post(process.env.CHECKIN_WEBHOOK, {
+          contact_phone: patient_phone,
+          contact_name: patientFullName,
+          checkin_text: checkin_text.trim()
+        }, { headers: { 'Content-Type': 'application/json' } });
+        console.log('Check-in text GHL webhook fired for ' + patientFullName);
       } catch (err) {
-        console.error('Failed to send check-in text:', err.message);
-        await sendSlackError('Check-In Text Failed — ' + patientFullName, err.message);
+        console.error('Failed to fire check-in webhook:', err.message);
+        await sendSlackError('Check-In Webhook Failed — ' + patientFullName, err.message);
       }
     }
 
