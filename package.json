@@ -4,7 +4,7 @@
   "description": "Post-call transcript webhook handler for Movement Clinic Physical Therapy",
   "main": "index.js",
   "scripts": {
-    "start": "node --max-http-header-size=65536 index.js"
+    "start": "node --max-http-header-size=524288 index.js"
   },
   "dependencies": {
     "axios": "^1.6.0",

@@ -2760,6 +2760,7 @@ app.get('/post-eval', (req, res) => {
       const res = await fetch('/post-eval', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'omit',
         body: JSON.stringify(data)
       });
       const result = await res.json();
