@@ -338,7 +338,7 @@ DECISION RULES:
 
 1. CONVERSATION TYPE CHECK: Determine what type of call this was.
 
-2. NAME EXTRACTION: If the contact name is unknown or a placeholder, attempt to extract the caller name from the transcript. Look for introductions. If found set extracted_name to that name, otherwise null.
+2. NAME EXTRACTION: Always attempt to extract the caller's full name from the transcript. Look for introductions, greetings, scheduling confirmations, or any moment where a name is stated. If a name is found, always set extracted_name to that full name regardless of what the contact record currently shows. Only set to null if truly no name is mentioned anywhere in the transcript.
 
 3. ATTRIBUTION: If this is a new contact with no existing pipeline, look for attribution signals in the transcript (Facebook ad mention, Google search, referral, website). Use this to select the most appropriate pipeline. Default to Incoming Calls if unclear.
 
@@ -367,7 +367,7 @@ OUTCOME I - RECORDS_REQUEST: An existing patient is calling specifically to requ
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NON_LEAD_CALL or RECORDS_REQUEST","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","extracted_email":"email address mentioned in transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NON_LEAD_CALL or RECORDS_REQUEST","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","extracted_email":"email address mentioned in transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false,"evaluating_pt":"name of the PT the evaluation was booked with — must be one of: Chris Bostwick, John Gan, TJ Aquino, Jordan McCormack. null if not mentioned"}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -705,30 +705,32 @@ function buildEvalSlackBlocks(params) {
 // Send daily digest email pulling from Google Sheet via Sheets API
 async function sendDailyDigest() {
   try {
-    const today = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' });
-    const dateLabel = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-    const SHEET_ID = CALL_ACTIVITY_SHEET_ID;
+    const now = new Date();
+    const today = now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }); // e.g. 4/17/2026
+    const todayParts = today.split('/'); // ['4','17','2026']
+    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const todayMonth = monthNames[parseInt(todayParts[0]) - 1]; // 'Apr'
+    const todayDay = todayParts[1]; // '17'
+    const dateLabel = now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
-    // Fetch today's rows from Google Sheet via public CSV export
-    // Sheet must be published: File → Share → Publish to web → CSV
     let sheetRows = [];
     try {
-      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID + '/export?format=csv&id=' + SHEET_ID;
+      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + CALL_ACTIVITY_SHEET_ID + '/export?format=csv';
       const sheetResponse = await axios.get(csvUrl);
       const lines = sheetResponse.data.split('\n').filter(l => l.trim());
       const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-      // Filter to today's rows based on timestamp column
       for (let i = 1; i < lines.length; i++) {
         const cols = lines[i].split(',').map(c => c.replace(/"/g, '').trim());
         const row = {};
         headers.forEach((h, idx) => { row[h] = cols[idx] || ''; });
-        if (row['timestamp'] && row['timestamp'].includes(today.split('/').slice(0,2).join('/'))) {
-          sheetRows.push(row);
-        }
+        // Match timestamps like "Apr 17, 2026" or "4/17/2026"
+        const ts = row['timestamp'] || '';
+        const matchesDate = ts.includes(todayMonth + ' ' + todayDay) || ts.includes(today);
+        if (matchesDate) sheetRows.push(row);
       }
+      console.log('Daily digest: total sheet rows:', lines.length - 1, '— matching today:', sheetRows.length);
     } catch (sheetErr) {
       console.error('Failed to fetch Google Sheet:', sheetErr.message);
-      // Fall back to in-memory log
       sheetRows = dailyEventLog.map(e => ({
         timestamp: e.timestamp, contact_name: e.contact,
         outcome: e.summary, pipeline: '', new_stage: '', confidence_score: '', red_flags: ''
@@ -737,26 +739,59 @@ async function sendDailyDigest() {
 
     if (!sheetRows || sheetRows.length === 0) {
       console.log('No events to digest today');
-      await sendSlackError('Daily Digest', 'No call activity logged today — digest not sent.');
       return;
     }
 
-    const digestPrompt = 'You are writing a daily operations digest email for Movement Clinic Physical Therapy. Summarize these call and pipeline activity records from today into a clean HTML email.\n\nDate: ' + dateLabel + '\nTotal Events: ' + sheetRows.length + '\n\nRecords:\n' +
-      sheetRows.map((r, i) => (i + 1) + '. ' + (r['contact_name'] || 'Unknown') + ' | ' + (r['outcome'] || '') + ' | Pipeline: ' + (r['pipeline'] || '') + ' → ' + (r['new_stage'] || '') + ' | Confidence: ' + (r['confidence_score'] || '') + ' | Flags: ' + (r['red_flags'] || 'None')).join('\n') +
-      '\n\nWrite a professional HTML email with inline styles, Montserrat font, max-width 600px:\n- Header with date and event count\n- Table with columns: Contact, Outcome, Pipeline, Stage, Confidence, Red Flags\n- Footer\n\nReturn ONLY the HTML string, no markdown.';
+    // Build hardcoded HTML template
+    const eventRows = sheetRows.map(r => {
+      const score = parseInt(r['confidence_score']) || 0;
+      const scoreColor = score >= 90 ? '#10b981' : score >= 70 ? '#f59e0b' : '#ef4444';
+      const hasFlag = r['red_flags'] && r['red_flags'] !== 'None' && r['red_flags'] !== '';
+      return '<tr>' +
+        '<td style="padding:10px 12px;font-size:13px;color:#1e293b;border-bottom:1px solid #f1f5f9;font-weight:600;">' + (r['contact_name'] || 'Unknown') + '<div style="font-size:11px;color:#94a3b8;font-weight:400;">' + (r['contact_phone'] || '') + '</div></td>' +
+        '<td style="padding:10px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;">' + (r['team_member'] || '—') + '</td>' +
+        '<td style="padding:10px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;">' + (r['pipeline'] || '—') + '<div style="font-size:11px;color:#94a3b8;">' + (r['previous_stage'] && r['new_stage'] && r['previous_stage'] !== r['new_stage'] ? r['previous_stage'] + ' → ' + r['new_stage'] : (r['new_stage'] || '')) + '</div></td>' +
+        '<td style="padding:10px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;max-width:180px;">' + (r['outcome'] || '—') + '</td>' +
+        '<td style="padding:10px 12px;font-size:13px;font-weight:700;color:' + scoreColor + ';border-bottom:1px solid #f1f5f9;text-align:center;">' + (r['confidence_score'] || '—') + '</td>' +
+        '<td style="padding:10px 12px;font-size:12px;color:' + (hasFlag ? '#ef4444' : '#94a3b8') + ';border-bottom:1px solid #f1f5f9;">' + (hasFlag ? r['red_flags'] : 'None') + '</td>' +
+        '</tr>';
+    }).join('');
 
-    const response = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      { model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages: [{ role: 'user', content: digestPrompt }] },
-      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
-    );
+    const evalCount = sheetRows.filter(r => (r['new_stage'] || '').toLowerCase().includes('eval')).length;
+    const flagCount = sheetRows.filter(r => r['red_flags'] && r['red_flags'] !== 'None' && r['red_flags'] !== '').length;
+    const avgConf = sheetRows.length > 0 ? Math.round(sheetRows.reduce((sum, r) => sum + (parseInt(r['confidence_score']) || 0), 0) / sheetRows.length) : 0;
 
-    const digestHtml = response.data.content[0].text.replace(/```html|```/g, '').trim();
+    const digestHtml = '<!DOCTYPE html><html><body style="margin:0;padding:20px 0;background:#f1f5f9;font-family:Montserrat,Segoe UI,Arial,sans-serif;">' +
+      '<div style="max-width:700px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">' +
+      '<div style="background:#1e3a5f;padding:32px;text-align:center;">' +
+      '<div style="font-size:20px;font-weight:700;color:#ffffff;margin-bottom:6px;">Movement Clinic — Daily Operations Digest</div>' +
+      '<div style="font-size:13px;color:#93c5fd;">' + dateLabel + '</div>' +
+      '</div>' +
+      '<div style="padding:24px 32px;">' +
+      '<table style="width:100%;border-collapse:collapse;margin-bottom:24px;"><tr>' +
+      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #2563eb;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + sheetRows.length + '</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Total Calls</div></div></td>' +
+      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #10b981;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + evalCount + '</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Evals Booked</div></div></td>' +
+      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #f59e0b;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + avgConf + '%</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Avg Confidence</div></div></td>' +
+      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #ef4444;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + flagCount + '</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Red Flags</div></div></td>' +
+      '</tr></table>' +
+      '<table style="width:100%;border-collapse:collapse;">' +
+      '<tr style="background:#f8fafc;">' +
+      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Contact</th>' +
+      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Team Member</th>' +
+      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Pipeline / Stage</th>' +
+      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Outcome</th>' +
+      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:center;border-bottom:2px solid #e2e8f0;">Confidence</th>' +
+      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Red Flags</th>' +
+      '</tr>' +
+      eventRows +
+      '</table>' +
+      '<div style="margin-top:20px;text-align:center;font-size:11px;color:#94a3b8;">Generated by Movement Clinic Claude AI &nbsp;&bull;&nbsp; ' + dateLabel + '</div>' +
+      '</div></div></body></html>';
 
     await axios.post('https://api.resend.com/emails', {
       from: FROM_EMAIL,
       to: [JORDAN_EMAIL],
-      subject: 'Daily Operations Digest — ' + dateLabel + ' (' + sheetRows.length + ' events)',
+      subject: 'Daily Operations Digest — ' + dateLabel + ' (' + sheetRows.length + ' calls)',
       html: digestHtml
     }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
 
@@ -1370,13 +1405,12 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
 
     // Update contact name if extracted from transcript
     let finalContactName = contactName;
-    if (claudeResult.extracted_name && isPlaceholderName) {
+    if (claudeResult.extracted_name) {
       const nameParts = claudeResult.extracted_name.trim().split(' ');
       try {
         await updateGHLContactName(contact.id, nameParts[0], nameParts.slice(1).join(' ') || '');
         finalContactName = claudeResult.extracted_name;
         console.log(`Updated contact name to: ${finalContactName}`);
-        // Also update the opportunity card name if one exists
         if (activeOpportunity) {
           await updateGHLOpportunityName(activeOpportunity.id, capitalizeFullName(finalContactName));
         }
@@ -1625,9 +1659,27 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
 
     // Send to deals board channel if eval was scheduled
     if (claudeResult.outcome === 'EVAL_SCHEDULED') {
-      const ptName = extractedTeamMember || claudeResult.team_member || null;
-      const ptSlackId = ptName && SLACK_USER_MAP[ptName] ? SLACK_USER_MAP[ptName] : null;
-      const ptMention = ptSlackId ? '<@' + ptSlackId + '>' : (ptName || 'Team');
+      // PT who will do the eval — from Claude's transcript analysis, filtered to valid eval PTs only
+      const VALID_EVAL_PTS = ['Chris Bostwick', 'John Gan', 'TJ Aquino', 'Jordan McCormack'];
+      const evalPtName = VALID_EVAL_PTS.includes(claudeResult.evaluating_pt) ? claudeResult.evaluating_pt
+        : VALID_EVAL_PTS.find(pt => claudeResult.plain_language_outcome && claudeResult.plain_language_outcome.includes(pt))
+        || VALID_EVAL_PTS.find(pt => claudeResult.note && claudeResult.note.includes(pt))
+        || null;
+      const evalPtSlackId = evalPtName && SLACK_USER_MAP[evalPtName] ? SLACK_USER_MAP[evalPtName] : null;
+      const evalPtDisplay = evalPtSlackId ? '<@' + evalPtSlackId + '>' : (evalPtName || 'TBD');
+
+      const patientEmail = claudeResult.extracted_email || (contact ? contact.email : null) || '';
+      const patientFirstName = finalContactName ? capitalizeFullName(finalContactName).split(' ')[0] : '';
+      const patientLastName = finalContactName ? capitalizeFullName(finalContactName).split(' ').slice(1).join(' ') : '';
+      const formUrl = RAILWAY_FORM_URL
+        ? RAILWAY_FORM_URL +
+          '?first=' + encodeURIComponent(patientFirstName) +
+          '&last=' + encodeURIComponent(patientLastName) +
+          '&phone=' + encodeURIComponent(contactPhone || '') +
+          '&email=' + encodeURIComponent(patientEmail)
+        : null;
+      console.log('Deals board form URL:', formUrl || 'RAILWAY_FORM_URL not set');
+
       const dealMsg = {
         fallback: 'New Eval Booked — ' + capitalizeFullName(finalContactName),
         blocks: [
@@ -1637,7 +1689,7 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
             { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') }
           ]},
           { type: 'section', fields: [
-            { type: 'mrkdwn', text: '*PT*\n' + ptMention },
+            { type: 'mrkdwn', text: '*Evaluating PT*\n' + evalPtDisplay },
             { type: 'mrkdwn', text: '*Call Time*\n' + getTimestamp() }
           ]},
           { type: 'section', text: { type: 'mrkdwn', text: '*Details*\n' + (claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details') } },
@@ -1646,19 +1698,7 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
             : [])
         ]
       };
-      // Build pre-filled post-eval form URL
-      const patientEmail = claudeResult.extracted_email || (contact ? contact.email : null) || '';
-      const patientFirstName = finalContactName ? finalContactName.split(' ')[0] : '';
-      const patientLastName = finalContactName ? finalContactName.split(' ').slice(1).join(' ') : '';
-      const formUrl = RAILWAY_FORM_URL
-        ? RAILWAY_FORM_URL +
-          '?first=' + encodeURIComponent(patientFirstName) +
-          '&last=' + encodeURIComponent(patientLastName) +
-          '&phone=' + encodeURIComponent(contactPhone || '') +
-          '&email=' + encodeURIComponent(patientEmail)
-        : null;
 
-      // Add form button to deals board message if URL is available
       if (formUrl) {
         dealMsg.blocks.push({
           type: 'actions',
@@ -1958,6 +1998,13 @@ app.get('/test-monthly-metrics', async (req, res) => {
   });
 });
 
+app.get('/test-daily-digest', async (req, res) => {
+  res.status(200).json({ message: 'Daily digest triggered — check jordan@ inbox in ~30 seconds' });
+  setImmediate(async () => {
+    try { await sendDailyDigest(); } catch (err) { console.error('Test daily digest failed:', err.message); }
+  });
+});
+
 app.get('/test-weekly-digest', async (req, res) => {
   res.status(200).json({ message: 'Weekly eval digest triggered — check jordan@ inbox in ~30 seconds' });
   setImmediate(async () => {
@@ -2123,6 +2170,35 @@ RETURN ONLY valid JSON with no preamble or markdown:
   "red_flags": "None identified."
 }`;
 
+// Send SMS immediately if within 8am-6pm PT, otherwise schedule for next 8am PT
+async function sendSMSWithinHours(toPhone, message) {
+  const now = new Date();
+  const ptTime = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
+  const hour = ptTime.getHours();
+
+  if (hour >= 8 && hour < 18) {
+    // Within hours — send immediately
+    await sendQuoSMS(toPhone, message);
+    console.log('SMS sent immediately (within business hours)');
+  } else {
+    // Outside hours — schedule for next 8am PT
+    const nextMorning = new Date(ptTime);
+    if (hour >= 18) nextMorning.setDate(nextMorning.getDate() + 1);
+    nextMorning.setHours(8, 0, 0, 0);
+    const msUntil = nextMorning - ptTime;
+    console.log('SMS scheduled for 8am PT (' + Math.round(msUntil / 60000) + ' minutes from now)');
+    setTimeout(async () => {
+      try {
+        await sendQuoSMS(toPhone, message);
+        console.log('Scheduled SMS sent at 8am PT to ' + toPhone);
+      } catch (err) {
+        console.error('Scheduled SMS failed:', err.message);
+        await sendSlackError('Scheduled SMS Failed', 'To: ' + toPhone + ' — ' + err.message);
+      }
+    }, msUntil);
+  }
+}
+
 async function sendQuoSMS(toPhone, message) {
   try {
     await axios.post(
@@ -2142,28 +2218,39 @@ async function sendQuoSMS(toPhone, message) {
 
 async function createGHLCalendarAppointment(contactId, calendarId, ptUserId, patientName, ptFirstName, dateStr, timeStr) {
   try {
-    // Parse date and time into ISO format
-    const dateTimeStr = `${dateStr} ${timeStr}`;
+    // Parse date and time — handle formats like "2026-04-18" and "2:00 PM"
+    const dateTimeStr = dateStr + ' ' + timeStr;
     const appointmentDate = new Date(dateTimeStr);
-    const endDate = new Date(appointmentDate.getTime() + 15 * 60000); // 15 min call block
+    if (isNaN(appointmentDate.getTime())) {
+      console.error('Invalid appointment date/time:', dateTimeStr);
+      return;
+    }
+    const endDate = new Date(appointmentDate.getTime() + 15 * 60000); // 15 min block
 
-    await axios.post(
+    const body = {
+      calendarId,
+      locationId: GHL_LOCATION_ID,
+      contactId,
+      title: 'Follow Up Call — ' + (patientName.split(' ')[0] || patientName) + ' x ' + ptFirstName,
+      appointmentStatus: 'confirmed',
+      assignedUserId: ptUserId,
+      startTime: appointmentDate.toISOString(),
+      endTime: endDate.toISOString(),
+      address: 'Phone Call'
+    };
+
+    console.log('Creating GHL calendar appointment:', JSON.stringify(body));
+
+    const response = await axios.post(
       'https://services.leadconnectorhq.com/calendars/events',
-      {
-        calendarId,
-        locationId: GHL_LOCATION_ID,
-        contactId,
-        title: `Follow Up Call - ${patientName.split(' ')[0]} x ${ptFirstName}`,
-        appointmentStatus: 'confirmed',
-        assignedUserId: ptUserId,
-        startTime: appointmentDate.toISOString(),
-        endTime: endDate.toISOString()
-      },
-      { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
+      body,
+      { headers: { 'Authorization': 'Bearer ' + GHL_API_KEY, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
     );
-    console.log('GHL calendar appointment created');
+    console.log('GHL calendar appointment created:', response.data?.id || 'success');
   } catch (err) {
-    console.error('Failed to create calendar appointment:', err.response?.data || err.message);
+    const errData = err.response?.data || err.message;
+    console.error('Failed to create calendar appointment:', JSON.stringify(errData));
+    throw err; // re-throw so withRetry can handle it
   }
 }
 
@@ -2512,6 +2599,7 @@ app.get('/post-eval', (req, res) => {
     <!-- Outcome -->
     <div class="card">
       <div class="card-title">Evaluation Outcome</div>
+      <div id="outcomeBanner" style="display:none;padding:16px 20px;border-radius:8px;margin-bottom:16px;font-size:18px;font-weight:700;text-align:center;letter-spacing:0.5px;"></div>
       <div class="field">
         <div class="radio-group" id="outcomeGroup">
           <div class="radio-pill outcome-pill">
@@ -2601,6 +2689,26 @@ app.get('/post-eval', (req, res) => {
 
 <script>
   // Conditional logic
+  // Outcome banner
+  document.querySelectorAll('input[name="outcome"]').forEach(radio => {
+    radio.addEventListener('change', function() {
+      const banner = document.getElementById('outcomeBanner');
+      const config = {
+        'Converted': { text: '✅ CONVERTED', bg: '#dcfce7', color: '#15803d', border: '#16a34a' },
+        'Pending': { text: '⏳ PENDING', bg: '#fef9c3', color: '#b45309', border: '#d97706' },
+        'Lost': { text: '❌ DID NOT CONVERT', bg: '#fee2e2', color: '#b91c1c', border: '#dc2626' }
+      };
+      const c = config[this.value];
+      if (c) {
+        banner.style.display = 'block';
+        banner.style.background = c.bg;
+        banner.style.color = c.color;
+        banner.style.border = '2px solid ' + c.border;
+        banner.textContent = c.text;
+      }
+    });
+  });
+
   document.querySelectorAll('input[name="outcome"]').forEach(radio => {
     radio.addEventListener('change', function() {
       document.getElementById('convertedOptions').classList.toggle('visible', this.value === 'Converted');
@@ -2754,7 +2862,7 @@ app.post('/post-eval', async (req, res) => {
       if (stage === 'Stage 1') {
         // Stage 1 — move Customer Pipeline card to Package Purchased
         newStageId = EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED;
-        await sendQuoSMS(patient_phone, STAGE1_TEXT(patient_first_name));
+        await sendSMSWithinHours(patient_phone, STAGE1_TEXT(patient_first_name));
         noteLines.push('✅ Customer Pipeline moved to Package Purchased.');
         noteLines.push('✅ Stage 1 superbill/physician text sent via Quo.');
 
@@ -2778,7 +2886,7 @@ app.post('/post-eval', async (req, res) => {
           noteLines.push('⚠️ Failed to create Continuity Pipeline opportunity — please add manually.');
         }
 
-        await sendQuoSMS(patient_phone, STAGE2_TEXT(patient_first_name));
+        await sendSMSWithinHours(patient_phone, STAGE2_TEXT(patient_first_name));
         noteLines.push('✅ Stage 2 superbill/physician text sent via Quo.');
       }
 
@@ -2878,6 +2986,17 @@ app.post('/post-eval', async (req, res) => {
         console.log('Rehab Essentials webhook fired');
       } catch (err) {
         console.error('Failed to fire Rehab Essentials webhook:', err.message);
+      }
+    }
+
+    // Send check-in text via Quo if requested (respects 8am-6pm PT window)
+    if (send_checkin === 'Yes' && checkin_text && checkin_text.trim()) {
+      try {
+        await sendSMSWithinHours(patient_phone, checkin_text.trim());
+        console.log('Check-in text sent or scheduled for ' + patient_phone);
+      } catch (err) {
+        console.error('Failed to send check-in text:', err.message);
+        await sendSlackError('Check-In Text Failed — ' + patientFullName, err.message);
       }
     }
 
