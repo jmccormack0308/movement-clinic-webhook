@@ -2361,6 +2361,8 @@ async function analyzeEvalWithClaude(transcript, outcome) {
 // Serve the post-eval form HTML
 app.get('/post-eval', (req, res) => {
   const ptNames = Object.keys(PT_CALENDARS);
+  const evalPtButtons = Object.keys(PT_CALENDARS).map(pt => '<div class="radio-pill"><input type="radio" name="evaluating_pt" id="ept_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="ept_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('');
+  const pocPtButtons = Object.keys(PT_CALENDARS).map(pt => '<div class="radio-pill"><input type="radio" name="plan_of_care_pt" id="poc_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="poc_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('');
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2447,7 +2449,7 @@ app.get('/post-eval', (req, res) => {
       <div class="card-title">Evaluating Physical Therapist</div>
       <div class="field">
         <div class="radio-group">
-          \${ptNames.map(pt => '<div class="radio-pill"><input type="radio" name="evaluating_pt" id="ept_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="ept_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('')}
+          ${evalPtButtons}
         </div>
       </div>
     </div>
@@ -2457,7 +2459,7 @@ app.get('/post-eval', (req, res) => {
       <div class="card-title">Plan of Care Physical Therapist</div>
       <div class="field">
         <div class="radio-group">
-          \${ptNames.map(pt => '<div class="radio-pill"><input type="radio" name="plan_of_care_pt" id="poc_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="poc_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('')}
+          ${pocPtButtons}
         </div>
       </div>
     </div>
@@ -2627,6 +2629,8 @@ app.post('/post-eval', async (req, res) => {
 
     console.log(`Found contact: ${contact.id}`);
 
+    const patientFullName = `${patient_first_name} ${patient_last_name}`;
+
     // Find or create Customer Pipeline opportunity
     const allOpps = await getAllContactOpportunities(contact.id);
     let customerOpp = allOpps.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID && o.status === 'open');
@@ -2634,12 +2638,11 @@ app.post('/post-eval', async (req, res) => {
 
     if (!customerOpp) {
       console.log('No Customer Pipeline opportunity found — creating one at Evaluation Scheduled');
-      const patientFullNameTemp = `${patient_first_name} ${patient_last_name}`;
       customerOpp = await createGHLOpportunity(
         contact.id,
         EVAL_CUSTOMER_PIPELINE_ID,
         EVAL_CUSTOMER_STAGES.EVALUATION_SCHEDULED,
-        patientFullNameTemp
+        patientFullName
       );
       customerOppCreated = true;
       console.log(`Created Customer Pipeline opportunity: ${customerOpp.id}`);
@@ -2657,12 +2660,11 @@ app.post('/post-eval', async (req, res) => {
     console.log(`Claude eval analysis complete: pending_subtype=${claudeResult.pending_subtype}`);
 
     // Determine purchase stage from form question (overrides Claude's guess)
-    const purchaseStage = previous_purchase === 'Yes' ? 'Stage 2' : previous_purchase === 'No' ? 'Stage 1' : purchaseStage || null;
+    const purchaseStage = previous_purchase === 'Yes' ? 'Stage 2' : previous_purchase === 'No' ? 'Stage 1' : claudeResult.purchase_stage || null;
 
     const ptInfo = PT_CALENDARS[evaluating_pt] || {};
     const planOfCarePT = plan_of_care_pt_form || claudeResult.plan_of_care_pt || evaluating_pt;
     const timestamp = getTimestamp();
-    const patientFullName = `${patient_first_name} ${patient_last_name}`;
 
     // Determine stage update and actions based on outcome
     let newStageId = null;
