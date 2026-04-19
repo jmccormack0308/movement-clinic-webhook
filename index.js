@@ -2778,9 +2778,7 @@ app.post('/post-eval', async (req, res) => {
 
     // Assign opportunity to plan of care PT
     const planOfCarePTInfo = PT_CALENDARS[planOfCarePT] || PT_CALENDARS[evaluating_pt] || {};
-    if (planOfCarePTInfo.ghlUserId && activeOpportunity) {
-      await assignOpportunityToUser(activeOpportunity ? activeOpportunity.id : customerOpp.id, planOfCarePTInfo.ghlUserId);
-    } else if (planOfCarePTInfo.ghlUserId) {
+    if (planOfCarePTInfo.ghlUserId && customerOpp) {
       await assignOpportunityToUser(customerOpp.id, planOfCarePTInfo.ghlUserId);
     }
 
