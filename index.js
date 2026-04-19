@@ -2113,6 +2113,8 @@ EXTRACT THE FOLLOWING:
 
 2. PAYMENT METHOD: Look for any mention of how the patient paid or will pay — Zelle, card on PTEverywhere, cash, check, installments, etc. If unclear return "Unclear from transcript".
 
+2b. PACKAGE PURCHASED (only if Converted): Extract the number of visits purchased. Must be exactly one of: "6", "10", "15", "20", "single". Return null if not Converted or unclear.
+
 3. IF PENDING — determine sub-type:
    - PENDING_VISIT: A follow-up in-person visit explicitly booked with a specific date
    - PENDING_CALL: A follow-up phone call has been committed to, even without an exact time. Includes 'I will call you by end of day tomorrow', 'expect my call by Friday', 'I will reach out tomorrow'. Calculate the date from context
@@ -2159,6 +2161,7 @@ RETURN ONLY valid JSON with no preamble or markdown:
   "plan_of_care_pt": null,
   "purchase_stage": null,
   "payment_method": "Unclear from transcript",
+  "package_purchased": null,
   "pending_subtype": null,
   "follow_up_visit_date": null,
   "follow_up_call_date": null,
@@ -2377,28 +2380,28 @@ app.get('/post-eval', (req, res) => {
     --surface: #f9fafb; --accent: #0f766e; --accent-light: #ccfbf1;
     --danger: #dc2626; --warn: #f59e0b; --radius: 10px;
   }
-  body { font-family: 'DM Sans', sans-serif; background: #f0f4f8; min-height: 100vh; padding: 40px 16px 80px; color: var(--ink); }
+  body { font-family: 'DM Sans', sans-serif; background: #f0f4f8; min-height: 100vh; padding: 20px 16px 40px; color: var(--ink); }
   .shell { max-width: 680px; margin: 0 auto; }
-  .header { text-align: center; margin-bottom: 40px; }
-  .header h1 { font-family: 'DM Serif Display', serif; font-size: 32px; font-weight: 400; letter-spacing: -0.5px; }
-  .header p { margin-top: 8px; font-size: 14px; color: var(--muted); }
-  .card { background: #fff; border-radius: 16px; border: 1px solid var(--border); padding: 32px; margin-bottom: 16px; }
-  .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin-bottom: 20px; }
-  .field { margin-bottom: 20px; }
+  .header { text-align: center; margin-bottom: 8px; }
+  .header h1 { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; letter-spacing: -0.5px; }
+  .header p { margin-top: 4px; font-size: 14px; color: var(--muted); }
+  .card { background: #fff; border-radius: 12px; border: 1px solid var(--border); padding: 14px 20px; margin-bottom: 10px; }
+  .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin-bottom: 8px; }
+  .field { margin-bottom: 8px; }
   .field:last-child { margin-bottom: 0; }
-  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--ink); }
+  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: var(--ink); }
   input[type="text"], input[type="email"], input[type="tel"], textarea {
-    width: 100%; padding: 10px 14px; border: 1.5px solid var(--border); border-radius: var(--radius);
+    width: 100%; padding: 8px 12px; border: 1.5px solid var(--border); border-radius: var(--radius);
     font-family: 'DM Sans', sans-serif; font-size: 14px; color: var(--ink); background: #fff;
     transition: border-color 0.15s; outline: none;
   }
   input:focus, textarea:focus { border-color: var(--accent); }
   textarea { resize: vertical; min-height: 160px; line-height: 1.6; }
-  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  .radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
   .radio-pill input[type="radio"] { display: none; }
   .radio-pill label {
-    display: inline-flex; align-items: center; padding: 8px 18px;
+    display: inline-flex; align-items: center; padding: 6px 14px;
     border: 1.5px solid var(--border); border-radius: 100px; font-size: 13px; font-weight: 500;
     cursor: pointer; transition: all 0.15s; color: var(--muted); background: var(--surface); margin: 0;
   }
@@ -2406,12 +2409,12 @@ app.get('/post-eval', (req, res) => {
   .outcome-pill input[type="radio"]:checked + label.converted { border-color: #059669; background: #d1fae5; color: #065f46; }
   .outcome-pill input[type="radio"]:checked + label.pending  { border-color: var(--warn); background: #fef3c7; color: #92400e; }
   .outcome-pill input[type="radio"]:checked + label.lost     { border-color: var(--danger); background: #fee2e2; color: #991b1b; }
-  .outcome-banner { display: none; padding: 16px 20px; border-radius: 8px; margin-bottom: 16px; font-size: 18px; font-weight: 700; text-align: center; letter-spacing: 0.5px; }
+  .outcome-banner { display: none; padding: 16px 20px; border-radius: 8px; margin-bottom: 8px; font-size: 16px; font-weight: 700; text-align: center; letter-spacing: 0.5px; }
   .checkin-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .submit-btn {
-    width: 100%; padding: 16px; background: var(--accent); color: #fff; border: none;
+    width: 100%; padding: 12px; background: var(--accent); color: #fff; border: none;
     border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 15px;
-    font-weight: 600; cursor: pointer; transition: opacity 0.15s, transform 0.1s; margin-top: 8px;
+    font-weight: 600; cursor: pointer; transition: opacity 0.15s, transform 0.1s; margin-top: 4px;
   }
   .submit-btn:hover { opacity: 0.92; }
   .submit-btn:active { transform: scale(0.99); }
@@ -2420,7 +2423,7 @@ app.get('/post-eval', (req, res) => {
   .status.success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; display: block; }
   .status.error   { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
   .status.loading { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; display: block; }
-  @media (max-width: 500px) { .row-2 { grid-template-columns: 1fr; } .card { padding: 24px 20px; } }
+  @media (max-width: 500px) { .row-2 { grid-template-columns: 1fr; } .card { padding: 14px 16px; } }
 </style>
 </head>
 <body>
@@ -2565,9 +2568,10 @@ app.get('/post-eval', (req, res) => {
       const result = await res.json();
       if (result.success) {
         status.className = 'status success';
-        status.textContent = 'Evaluation submitted successfully. GHL has been updated.';
+        status.textContent = 'Evaluation submitted successfully. GHL has been updated. This tab will close in 3 seconds.';
         this.reset();
         document.getElementById('outcomeBanner').style.display = 'none';
+        setTimeout(() => window.close(), 3000);
       } else {
         throw new Error(result.error || 'Unknown error');
       }
@@ -2662,6 +2666,20 @@ app.post('/post-eval', async (req, res) => {
     // Determine purchase stage from form question (overrides Claude's guess)
     const purchaseStage = previous_purchase === 'Yes' ? 'Stage 2' : previous_purchase === 'No' ? 'Stage 1' : claudeResult.purchase_stage || null;
 
+    // Calculate opportunity value from package and payment method
+    const isZelle = (claudeResult.payment_method || '').toLowerCase().includes('zelle');
+    const packagePricing = {
+      '6':      { standard: 1350, zelle: 1320 },
+      '10':     { standard: 2050, zelle: 2000 },
+      '15':     { standard: 2775, zelle: 2700 },
+      '20':     { standard: 3500, zelle: 3400 },
+      'single': { standard: 250,  zelle: 250  }
+    };
+    const packageKey = claudeResult.package_purchased;
+    const opportunityValue = packageKey && packagePricing[packageKey]
+      ? (isZelle ? packagePricing[packageKey].zelle : packagePricing[packageKey].standard)
+      : null;
+
     const ptInfo = PT_CALENDARS[evaluating_pt] || {};
     const planOfCarePT = plan_of_care_pt_form || claudeResult.plan_of_care_pt || evaluating_pt;
     const timestamp = getTimestamp();
@@ -2693,17 +2711,41 @@ app.post('/post-eval', async (req, res) => {
           noteLines.push('ℹ️ Customer Pipeline already at Package Purchased — no stage change needed.');
         }
 
-        // Always create Continuity Pipeline opportunity for Stage 2
-        try {
-          await withRetry(() => createGHLOpportunity(contact.id, CONTINUITY_PIPELINE_ID, CONTINUITY_PURCHASED_STAGE_ID, patientFullName), 'Create Continuity Pipeline card — ' + patientFullName);
-          noteLines.push('✅ Continuity Pipeline opportunity created at Continuity Purchased.');
-        } catch (err) {
-          console.error('Failed to create continuity opportunity:', err.message);
-          noteLines.push('⚠️ Failed to create Continuity Pipeline opportunity — please add manually.');
+        // Create Continuity Pipeline opportunity for Stage 2 — skip if one already exists
+        const existingContinuityOpp = allOpps.find(o => o.pipelineId === CONTINUITY_PIPELINE_ID);
+        if (existingContinuityOpp) {
+          noteLines.push('ℹ️ Continuity Pipeline card already exists — no new card created.');
+        } else {
+          try {
+            await withRetry(() => createGHLOpportunity(contact.id, CONTINUITY_PIPELINE_ID, CONTINUITY_PURCHASED_STAGE_ID, patientFullName), 'Create Continuity Pipeline card — ' + patientFullName);
+            noteLines.push('✅ Continuity Pipeline opportunity created at Continuity Purchased.');
+          } catch (err) {
+            console.error('Failed to create continuity opportunity:', err.message);
+            noteLines.push('⚠️ Failed to create Continuity Pipeline opportunity — please add manually.');
+          }
         }
 
         await sendSMSWithinHours(patient_phone, STAGE2_TEXT(patient_first_name));
         noteLines.push('✅ Stage 2 superbill/physician text sent via Quo.');
+      }
+
+      // If converted but package unclear — create task for info@ to update value manually
+      if (outcome === 'Converted' && opportunityValue === null) {
+        try {
+          const valueTaskDue = new Date();
+          valueTaskDue.setDate(valueTaskDue.getDate() + 1);
+          const oppUrl = customerOpp ? 'https://app.gohighlevel.com/v2/location/' + GHL_LOCATION_ID + '/opportunities/' + customerOpp.id : 'GHL';
+          await createGHLTask(
+            contact.id,
+            'Update Opportunity Value — ' + patientFullName + ' (' + oppUrl + ')',
+            valueTaskDue,
+            'Claude could not determine the package purchased from the eval transcript. Please review the opportunity card and update the monetary value manually. Opportunity: ' + oppUrl
+          );
+          noteLines.push('⚠️ Package/value unclear from transcript — task created for manual value update.');
+          console.log('Value-unclear task created for ' + patientFullName);
+        } catch (taskErr) {
+          console.error('Failed to create value task:', taskErr.message);
+        }
       }
 
     } else if (outcome === 'Pending') {
@@ -2770,10 +2812,14 @@ app.post('/post-eval', async (req, res) => {
       noteLines.push(`Physician: ${claudeResult.physician_name}${claudeResult.physician_office ? ` — ${claudeResult.physician_office}` : ''}`);
     }
 
-    // Update Customer Pipeline opportunity stage
+    // Update Customer Pipeline opportunity stage and/or value
     if (newStageId) {
-      await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, null), 'Final stage update — ' + patientFullName);
+      await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, opportunityValue), 'Final stage update — ' + patientFullName);
       console.log(`Customer Pipeline updated to stage: ${newStageId}`);
+    } else if (opportunityValue !== null) {
+      // Stage unchanged but update the monetary value
+      await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, customerOpp.pipelineStageId, opportunityValue), 'Update opportunity value — ' + patientFullName);
+      console.log(`Opportunity value updated to: ${opportunityValue}`);
     }
 
     // Assign opportunity to plan of care PT
