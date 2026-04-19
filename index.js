@@ -1165,38 +1165,54 @@ Return ONLY valid JSON:
 async function generateEvalEmailContent(params) {
   const { contactName, contactPhone, evaluatingPT, planOfCarePT, outcome, stage, paymentMethod, problemSummary, treatmentPlan, evaluationSummary, nextSteps, redFlags, calendarCreated, continuityCreated, checkinScheduled, objectionCategory, objectionDetail, physicianName, physicianOffice, coachingNotes } = params;
 
-  const prompt = `Write two concise post-evaluation summary emails for Movement Clinic Physical Therapy. Be brief — no fluff, no long paragraphs. Every section should be scannable in under 10 seconds.
+  const prompt = `Write one HTML summary email for Jordan McCormack at Movement Clinic Physical Therapy.
 
 DATA:
 Patient: ${contactName} | ${contactPhone}
-Outcome: ${outcome}${stage ? ' — ' + stage : ''}
+Outcome: ${outcome}${stage ? ' \u2014 ' + stage : ''}
 Evaluating PT: ${evaluatingPT} | Plan of Care PT: ${planOfCarePT}
-Payment: ${paymentMethod || 'Unclear'}
-Next Steps: ${nextSteps || 'None'}
-Objection: ${objectionCategory ? objectionCategory + (objectionDetail ? ' — ' + objectionDetail : '') : 'None'}
-Calendar Appt: ${calendarCreated || 'No'} | Continuity Card: ${continuityCreated || 'No'} | Check-In Text: ${checkinScheduled || 'No'}
-Physician: ${physicianName ? physicianName + (physicianOffice ? ' — ' + physicianOffice : '') : 'None'}
+Payment: ${paymentMethod || 'Unclear from transcript'}
+Next Steps: ${nextSteps || 'None established'}
+Objection: ${objectionCategory ? objectionCategory + (objectionDetail ? ' \u2014 ' + objectionDetail : '') : 'None'}
+Calendar Appointment Created: ${calendarCreated || 'No'}
+Continuity Pipeline Card: ${continuityCreated || 'No'}
+Check-In Text Scheduled: ${checkinScheduled || 'No'}
+Physician: ${physicianName ? physicianName + (physicianOffice ? ' \u2014 ' + physicianOffice : '') : 'None mentioned'}
 Red Flags: ${redFlags || 'None identified'}
 Problem Summary: ${problemSummary || 'Not available'}
 Treatment Plan: ${treatmentPlan || 'Not available'}
 Coaching Notes: ${coachingNotes || 'None'}
 
-EMAIL 1 — TEAM (no clinical/coaching content):
-- Compact outcome header (colored left border: blue=converted, orange=pending, red=lost)
-- One-line next steps
-- Small actions table: Payment | Calendar | Continuity | Check-In | Objection (if any) | Physician (if any)
-- Red flags line (always show, even if none)
-- Plain HTML, inline styles, max-width 560px, system font stack, no images
+BUILD THIS EXACT EMAIL STRUCTURE using inline styles, max-width 600px, font-family: Segoe UI, Arial, sans-serif:
 
-EMAIL 2 — JORDAN ONLY (same as team email plus):
-- WHAT WAS THE PROBLEM: 2-3 sentences max
-- WHAT IS THE PLAN: 2-3 sentences max  
-- COACHING NOTES: 3-5 tight bullet points, direct and specific
+1. HEADER BLOCK - left border 4px solid #2563eb, background #eaf4ff, padding 16px 20px:
+   Bold "Evaluation Complete" in #1e3a5f at 18px. Below it: "Patient: [name] ([phone]) | Outcome: [outcome] | PT: [evaluatingPT]" in 14px.
 
-Both emails must be short enough to read in under 60 seconds. No lengthy prose anywhere.
+2. EVALUATION SUMMARY - bold uppercase heading. Rich prose paragraphs:
+   - What brought the patient in, symptoms and history (from Problem Summary)
+   - What was assessed and identified
+   - What was recommended (from Treatment Plan)
+   Write as clinical narrative, 2-4 paragraphs, not bullet points.
 
-Return ONLY valid JSON — no markdown, no preamble:
-{"team_email_html": "...", "jordan_email_html": "..."}`;
+3. NEXT STEPS - bold uppercase heading. Bullet list of agreed next steps.
+
+4. GHL ACTIONS TAKEN - bold uppercase heading. Table rows with 1px #f0f0f0 bottom border, padding 9px 0:
+   Payment Method | [value]
+   Calendar Appointment | [value]
+   Continuity Pipeline Card | [value]
+   Check-In Text Scheduled | [value]
+   Objection | [value or None]
+   Physician | [value or None]
+   Left cell: bold, 45% width. Right cell: normal weight.
+
+5. RED FLAGS - left border 4px solid #f59e0b, background #fffbeb, padding 14px 16px:
+   "Flag RED FLAGS" bold in #92400e. Then the red flags text below. Always show even if none.
+
+6. COACHING NOTES - left border 4px solid #6366f1, background #eef2ff, padding 14px 16px:
+   "Bulb COACHING NOTES" bold in #3730a3. Each point: bold label in #3730a3 + colon + regular explanation. Blank line between points.
+
+Return ONLY valid JSON with no markdown or preamble:
+{"jordan_email_html": "complete HTML string"}`;
 
   const response = await axios.post(
     'https://api.anthropic.com/v1/messages',
@@ -2120,8 +2136,8 @@ EXTRACT THE FOLLOWING:
 
 3. IF PENDING — determine sub-type:
    - PENDING_VISIT: A follow-up in-person visit explicitly booked with a specific date
-   - PENDING_CALL: A follow-up phone call has been committed to, even without an exact time. Includes 'I will call you by end of day tomorrow', 'expect my call by Friday', 'I will reach out tomorrow'. Calculate the date from context
-   - PENDING_VAGUE: No firm date/time established, patient said they will think about it, reach out later, or no next step was set
+   - PENDING_CALL: A follow-up phone call was explicitly agreed upon WITH a specific date AND time confirmed by both parties. Example: "call me Tuesday at 2pm", "I'll be free Thursday morning around 10". The PT and patient must have mutually agreed on a specific date/time.
+   - PENDING_VAGUE: Anything less than a confirmed date AND time — includes "I'll text you tomorrow", "I'll reach out soon", "call me end of day", "I'll think about it", vague timeframes with no specific time, or patient-initiated contact with no confirmed window. When in doubt use PENDING_VAGUE.
 
 4. IF PENDING_VISIT — extract: follow_up_visit_date (format: YYYY-MM-DD or null)
 
@@ -2241,14 +2257,29 @@ async function sendQuoSMS(toPhone, message) {
 
 async function createGHLCalendarAppointment(contactId, calendarId, ptUserId, patientName, ptFirstName, dateStr, timeStr) {
   try {
-    // Parse date and time — handle formats like "2026-04-18" and "2:00 PM"
-    const dateTimeStr = dateStr + ' ' + timeStr;
-    const appointmentDate = new Date(dateTimeStr);
+    // Parse date (YYYY-MM-DD) and time (H:MM AM/PM or HH:MM) explicitly in PT timezone
+    const [year, month, day] = dateStr.split('-').map(Number);
+    let hours = 9, minutes = 0; // default 9am if time unparseable
+    if (timeStr) {
+      const timeMatch = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+      if (timeMatch) {
+        hours = parseInt(timeMatch[1]);
+        minutes = parseInt(timeMatch[2]);
+        const meridiem = (timeMatch[3] || '').toUpperCase();
+        if (meridiem === 'PM' && hours < 12) hours += 12;
+        if (meridiem === 'AM' && hours === 12) hours = 0;
+      }
+    }
+    // Build ISO string in PT (UTC-7 PDT / UTC-8 PST) — use fixed offset based on current date
+    const ptOffset = -7; // PDT (adjust to -8 for PST in winter)
+    const utcHours = hours - ptOffset;
+    const appointmentDate = new Date(Date.UTC(year, month - 1, day, utcHours, minutes, 0));
     if (isNaN(appointmentDate.getTime())) {
-      console.error('Invalid appointment date/time:', dateTimeStr);
+      console.error('Invalid appointment date/time:', dateStr, timeStr);
       return;
     }
     const endDate = new Date(appointmentDate.getTime() + 15 * 60000); // 15 min block
+    console.log('Parsed appointment:', dateStr, timeStr, '→', appointmentDate.toISOString());
 
     const body = {
       calendarId,
@@ -3023,19 +3054,10 @@ app.post('/post-eval', async (req, res) => {
 
       const evalSubject = 'Post-Eval Summary — ' + patientFullName + ' (' + outcome + (purchaseStage ? ' ' + purchaseStage : '') + ')';
 
-      // Team email — no coaching notes, sent immediately
-      await sendEmailAndSlack({
-        to: [TEAM_EMAIL],
-        subject: evalSubject,
-        html: evalEmailContent.team_email_html || '<p>Eval processed for ' + patientFullName + '</p>',
-        slackMessage: null
-      });
-      console.log('Team eval email sent');
-
-      // Jordan email — includes coaching notes, sent immediately
+      // Jordan email only — full summary with clinical notes and coaching
       await sendEmailAndSlack({
         to: [JORDAN_EMAIL],
-        subject: evalSubject + ' — Full + Coaching Notes',
+        subject: evalSubject,
         html: evalEmailContent.jordan_email_html || '<p>Eval processed for ' + patientFullName + '</p>',
         slackMessage: null
       });
