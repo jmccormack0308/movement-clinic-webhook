@@ -2359,11 +2359,17 @@ async function analyzeEvalWithClaude(transcript, outcome) {
   const userMessage = `${EVAL_CLAUDE_PROMPT}\n\nOUTCOME SELECTED BY PT: ${outcome}\n\nTRANSCRIPT:\n${transcript}`;
   const response = await axios.post(
     'https://api.anthropic.com/v1/messages',
-    { model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: userMessage }] },
+    { model: 'claude-haiku-4-5-20251001', max_tokens: 4096, messages: [{ role: 'user', content: userMessage }] },
     { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
   );
   const text = response.data.content[0].text;
-  return JSON.parse(text.replace(/```json|```/g, '').trim());
+  const cleaned = text.replace(/```json|```/g, '').trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch (parseErr) {
+    console.error('analyzeEvalWithClaude JSON parse failed. Raw response:', cleaned.substring(0, 500));
+    throw new Error('Claude eval analysis returned invalid JSON: ' + parseErr.message);
+  }
 }
 
 // Thank you page
