@@ -2361,6 +2361,70 @@ async function analyzeEvalWithClaude(transcript, outcome) {
   return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
 
+// Thank you page
+app.get('/thank-you', (req, res) => {
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Submitted — Movement Clinic</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #f0f4f8;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .card {
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid #e5e7eb;
+    padding: 48px 40px;
+    max-width: 480px;
+    width: 100%;
+    text-align: center;
+  }
+  .check {
+    width: 64px;
+    height: 64px;
+    background: #d1fae5;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 24px;
+    font-size: 28px;
+  }
+  h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 26px;
+    font-weight: 400;
+    color: #1a1a1a;
+    margin-bottom: 12px;
+  }
+  p {
+    font-size: 14px;
+    color: #6b7280;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="check">✅</div>
+  <h1>Thank you for your submission</h1>
+  <p>GHL has been updated and the summary email is on its way. You can close this tab.</p>
+</div>
+</body>
+</html>`);
+});
+
 // Serve the post-eval form HTML
 app.get('/post-eval', (req, res) => {
   const ptNames = Object.keys(PT_CALENDARS);
@@ -2568,10 +2632,8 @@ app.get('/post-eval', (req, res) => {
       const result = await res.json();
       if (result.success) {
         status.className = 'status success';
-        status.textContent = 'Evaluation submitted successfully. GHL has been updated. This tab will close in 3 seconds.';
-        this.reset();
-        document.getElementById('outcomeBanner').style.display = 'none';
-        setTimeout(() => window.close(), 3000);
+        status.textContent = 'Submitted! Redirecting...';
+        setTimeout(() => { window.location.href = '/thank-you'; }, 800);
       } else {
         throw new Error(result.error || 'Unknown error');
       }
@@ -2947,6 +3009,8 @@ app.post('/post-eval', async (req, res) => {
     };
 
     // Generate Claude-written eval emails — send immediately via Resend + Slack notification + Redis log
+    console.log('Waiting 65 seconds before generating eval summary emails to avoid rate limit...');
+    await new Promise(resolve => setTimeout(resolve, 65000));
     console.log('Generating eval summary emails...');
     try {
       const evalEmailContent = await generateEvalEmailContent({
