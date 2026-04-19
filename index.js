@@ -17,7 +17,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 const SLACK_DEALS_CHANNEL_ID = 'C07T7PK0GAE';
-const GOOGLE_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSdAsFSHugQQ9HRgrOmfiktbrmNOF4ixBrW6-qklebQQgfrghQ/viewform';
+const RAILWAY_FORM_URL = process.env.RAILWAY_STATIC_URL ? 'https://' + process.env.RAILWAY_STATIC_URL + '/post-eval' : null;
 
 // Slack user IDs for PT tagging
 const SLACK_USER_MAP = {
@@ -1671,12 +1671,14 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       const patientEmail = claudeResult.extracted_email || (contact ? contact.email : null) || '';
       const patientFirstName = finalContactName ? capitalizeFullName(finalContactName).split(' ')[0] : '';
       const patientLastName = finalContactName ? capitalizeFullName(finalContactName).split(' ').slice(1).join(' ') : '';
-      const formUrl = GOOGLE_FORM_URL +
-        '?entry.2109735758=' + encodeURIComponent(patientFirstName) +
-        '&entry.1083584090=' + encodeURIComponent(patientLastName) +
-        '&entry.447167402=' + encodeURIComponent(patientEmail) +
-        '&entry.2021432687=' + encodeURIComponent((contactPhone || '').replace(/\D/g, ''));
-      console.log('Deals board form URL:', formUrl);
+      const formUrl = RAILWAY_FORM_URL
+        ? RAILWAY_FORM_URL +
+          '?first=' + encodeURIComponent(patientFirstName) +
+          '&last=' + encodeURIComponent(patientLastName) +
+          '&phone=' + encodeURIComponent(contactPhone || '') +
+          '&email=' + encodeURIComponent(patientEmail)
+        : null;
+      console.log('Deals board form URL:', formUrl || 'RAILWAY_FORM_URL not set');
 
       const dealMsg = {
         fallback: 'New Eval Booked — ' + capitalizeFullName(finalContactName),
@@ -2107,6 +2109,8 @@ EXTRACT THE FOLLOWING:
 
 1. PLAN OF CARE PT: Look for any mention of who will be handling ongoing care. Return null if not mentioned (system defaults to evaluating PT).
 
+1b. PURCHASE STAGE (only if Converted): Determine if this is a "Stage 1" (first-time/new package purchase) or "Stage 2" (returning patient purchasing again/continuing care). Return null if not Converted.
+
 2. PAYMENT METHOD: Look for any mention of how the patient paid or will pay — Zelle, card on PTEverywhere, cash, check, installments, etc. If unclear return "Unclear from transcript".
 
 3. IF PENDING — determine sub-type:
@@ -2153,6 +2157,7 @@ EXTRACT THE FOLLOWING:
 RETURN ONLY valid JSON with no preamble or markdown:
 {
   "plan_of_care_pt": null,
+  "purchase_stage": null,
   "payment_method": "Unclear from transcript",
   "pending_subtype": null,
   "follow_up_visit_date": null,
@@ -2355,6 +2360,7 @@ async function analyzeEvalWithClaude(transcript, outcome) {
 
 // Serve the post-eval form HTML
 app.get('/post-eval', (req, res) => {
+  const ptNames = Object.keys(PT_CALENDARS);
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2364,195 +2370,55 @@ app.get('/post-eval', (req, res) => {
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  
   :root {
-    --ink: #1a1a1a;
-    --muted: #6b7280;
-    --border: #e5e7eb;
-    --surface: #f9fafb;
-    --accent: #0f766e;
-    --accent-light: #ccfbf1;
-    --danger: #dc2626;
-    --warn: #f59e0b;
-    --radius: 10px;
+    --ink: #1a1a1a; --muted: #6b7280; --border: #e5e7eb;
+    --surface: #f9fafb; --accent: #0f766e; --accent-light: #ccfbf1;
+    --danger: #dc2626; --warn: #f59e0b; --radius: 10px;
   }
-
-  body {
-    font-family: 'DM Sans', sans-serif;
-    background: #f0f4f8;
-    min-height: 100vh;
-    padding: 40px 16px 80px;
-    color: var(--ink);
-  }
-
-  .shell {
-    max-width: 680px;
-    margin: 0 auto;
-  }
-
-  .header {
-    text-align: center;
-    margin-bottom: 40px;
-  }
-
-  .header h1 {
-    font-family: 'DM Serif Display', serif;
-    font-size: 32px;
-    font-weight: 400;
-    letter-spacing: -0.5px;
-    color: var(--ink);
-  }
-
-  .header p {
-    margin-top: 8px;
-    font-size: 14px;
-    color: var(--muted);
-  }
-
-  .card {
-    background: #fff;
-    border-radius: 16px;
-    border: 1px solid var(--border);
-    padding: 32px;
-    margin-bottom: 16px;
-  }
-
-  .card-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: var(--muted);
-    margin-bottom: 20px;
-  }
-
+  body { font-family: 'DM Sans', sans-serif; background: #f0f4f8; min-height: 100vh; padding: 40px 16px 80px; color: var(--ink); }
+  .shell { max-width: 680px; margin: 0 auto; }
+  .header { text-align: center; margin-bottom: 40px; }
+  .header h1 { font-family: 'DM Serif Display', serif; font-size: 32px; font-weight: 400; letter-spacing: -0.5px; }
+  .header p { margin-top: 8px; font-size: 14px; color: var(--muted); }
+  .card { background: #fff; border-radius: 16px; border: 1px solid var(--border); padding: 32px; margin-bottom: 16px; }
+  .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin-bottom: 20px; }
   .field { margin-bottom: 20px; }
   .field:last-child { margin-bottom: 0; }
-
-  label {
-    display: block;
-    font-size: 13px;
-    font-weight: 500;
-    margin-bottom: 6px;
-    color: var(--ink);
+  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; color: var(--ink); }
+  input[type="text"], input[type="email"], input[type="tel"], textarea {
+    width: 100%; padding: 10px 14px; border: 1.5px solid var(--border); border-radius: var(--radius);
+    font-family: 'DM Sans', sans-serif; font-size: 14px; color: var(--ink); background: #fff;
+    transition: border-color 0.15s; outline: none;
   }
-
-  input[type="text"],
-  input[type="email"],
-  input[type="tel"],
-  textarea {
-    width: 100%;
-    padding: 10px 14px;
-    border: 1.5px solid var(--border);
-    border-radius: var(--radius);
-    font-family: 'DM Sans', sans-serif;
-    font-size: 14px;
-    color: var(--ink);
-    background: #fff;
-    transition: border-color 0.15s;
-    outline: none;
-  }
-
-  input:focus, textarea:focus {
-    border-color: var(--accent);
-  }
-
-  textarea {
-    resize: vertical;
-    min-height: 200px;
-    line-height: 1.6;
-  }
-
-  .row-2 {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-  }
-
-  .radio-group {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-  }
-
+  input:focus, textarea:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 160px; line-height: 1.6; }
+  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .radio-group { display: flex; flex-wrap: wrap; gap: 10px; }
   .radio-pill input[type="radio"] { display: none; }
-
   .radio-pill label {
-    display: inline-flex;
-    align-items: center;
-    padding: 8px 18px;
-    border: 1.5px solid var(--border);
-    border-radius: 100px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-    color: var(--muted);
-    background: var(--surface);
-    margin: 0;
+    display: inline-flex; align-items: center; padding: 8px 18px;
+    border: 1.5px solid var(--border); border-radius: 100px; font-size: 13px; font-weight: 500;
+    cursor: pointer; transition: all 0.15s; color: var(--muted); background: var(--surface); margin: 0;
   }
-
-  .radio-pill input[type="radio"]:checked + label {
-    border-color: var(--accent);
-    background: var(--accent-light);
-    color: var(--accent);
-  }
-
+  .radio-pill input[type="radio"]:checked + label { border-color: var(--accent); background: var(--accent-light); color: var(--accent); }
   .outcome-pill input[type="radio"]:checked + label.converted { border-color: #059669; background: #d1fae5; color: #065f46; }
-  .outcome-pill input[type="radio"]:checked + label.pending { border-color: var(--warn); background: #fef3c7; color: #92400e; }
-  .outcome-pill input[type="radio"]:checked + label.lost { border-color: var(--danger); background: #fee2e2; color: #991b1b; }
-
-  .conditional { display: none; }
-  .conditional.visible { display: block; }
-
-  .conditional-card {
-    background: var(--surface);
-    border: 1.5px solid var(--border);
-    border-radius: var(--radius);
-    padding: 20px;
-    margin-top: 16px;
-  }
-
-  .conditional-card .card-title {
-    margin-bottom: 14px;
-  }
-
+  .outcome-pill input[type="radio"]:checked + label.pending  { border-color: var(--warn); background: #fef3c7; color: #92400e; }
+  .outcome-pill input[type="radio"]:checked + label.lost     { border-color: var(--danger); background: #fee2e2; color: #991b1b; }
+  .outcome-banner { display: none; padding: 16px 20px; border-radius: 8px; margin-bottom: 16px; font-size: 18px; font-weight: 700; text-align: center; letter-spacing: 0.5px; }
+  .checkin-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .submit-btn {
-    width: 100%;
-    padding: 16px;
-    background: var(--accent);
-    color: #fff;
-    border: none;
-    border-radius: var(--radius);
-    font-family: 'DM Sans', sans-serif;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity 0.15s, transform 0.1s;
-    margin-top: 8px;
+    width: 100%; padding: 16px; background: var(--accent); color: #fff; border: none;
+    border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 15px;
+    font-weight: 600; cursor: pointer; transition: opacity 0.15s, transform 0.1s; margin-top: 8px;
   }
-
   .submit-btn:hover { opacity: 0.92; }
   .submit-btn:active { transform: scale(0.99); }
   .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-  .status {
-    display: none;
-    padding: 16px 20px;
-    border-radius: var(--radius);
-    font-size: 14px;
-    font-weight: 500;
-    margin-top: 16px;
-  }
-
+  .status { display: none; padding: 16px 20px; border-radius: var(--radius); font-size: 14px; font-weight: 500; margin-top: 16px; }
   .status.success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; display: block; }
-  .status.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
+  .status.error   { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
   .status.loading { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; display: block; }
-
-  @media (max-width: 500px) {
-    .row-2 { grid-template-columns: 1fr; }
-    .card { padding: 24px 20px; }
-  }
+  @media (max-width: 500px) { .row-2 { grid-template-columns: 1fr; } .card { padding: 24px 20px; } }
 </style>
 </head>
 <body>
@@ -2561,44 +2427,37 @@ app.get('/post-eval', (req, res) => {
     <h1>Post-Eval Summary</h1>
     <p>Complete immediately after the evaluation session</p>
   </div>
-
   <form id="evalForm">
 
     <!-- Patient Info -->
     <div class="card">
       <div class="card-title">Patient Information</div>
       <div class="row-2">
-        <div class="field">
-          <label>First Name</label>
-          <input type="text" name="patient_first_name" required placeholder="First name">
-        </div>
-        <div class="field">
-          <label>Last Name</label>
-          <input type="text" name="patient_last_name" required placeholder="Last name">
-        </div>
+        <div class="field"><label>First Name</label><input type="text" name="patient_first_name" required placeholder="First name"></div>
+        <div class="field"><label>Last Name</label><input type="text" name="patient_last_name" required placeholder="Last name"></div>
       </div>
       <div class="row-2">
-        <div class="field">
-          <label>Email</label>
-          <input type="email" name="patient_email" required placeholder="patient@email.com">
-        </div>
-        <div class="field">
-          <label>Phone</label>
-          <input type="tel" name="patient_phone" required placeholder="+1 (555) 000-0000">
+        <div class="field"><label>Email</label><input type="email" name="patient_email" required placeholder="patient@email.com"></div>
+        <div class="field"><label>Phone</label><input type="tel" name="patient_phone" required placeholder="6265550000"></div>
+      </div>
+    </div>
+
+    <!-- Evaluating PT -->
+    <div class="card">
+      <div class="card-title">Evaluating Physical Therapist</div>
+      <div class="field">
+        <div class="radio-group">
+          \${ptNames.map(pt => '<div class="radio-pill"><input type="radio" name="evaluating_pt" id="ept_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="ept_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('')}
         </div>
       </div>
     </div>
 
-    <!-- PT Selection -->
+    <!-- Plan of Care PT -->
     <div class="card">
-      <div class="card-title">Evaluating Physical Therapist</div>
+      <div class="card-title">Plan of Care Physical Therapist</div>
       <div class="field">
-        <div class="radio-group" id="ptGroup">
-          ${Object.keys(PT_CALENDARS).map(pt => `
-          <div class="radio-pill">
-            <input type="radio" name="evaluating_pt" id="pt_${pt.replace(' ', '_')}" value="${pt}" required>
-            <label for="pt_${pt.replace(' ', '_')}">${pt}</label>
-          </div>`).join('')}
+        <div class="radio-group">
+          \${ptNames.map(pt => '<div class="radio-pill"><input type="radio" name="plan_of_care_pt" id="poc_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="poc_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('')}
         </div>
       </div>
     </div>
@@ -2606,77 +2465,41 @@ app.get('/post-eval', (req, res) => {
     <!-- Outcome -->
     <div class="card">
       <div class="card-title">Evaluation Outcome</div>
-      <div id="outcomeBanner" style="display:none;padding:16px 20px;border-radius:8px;margin-bottom:16px;font-size:18px;font-weight:700;text-align:center;letter-spacing:0.5px;"></div>
+      <div id="outcomeBanner" class="outcome-banner"></div>
       <div class="field">
-        <div class="radio-group" id="outcomeGroup">
-          <div class="radio-pill outcome-pill">
-            <input type="radio" name="outcome" id="outcome_converted" value="Converted" required>
-            <label for="outcome_converted" class="converted">Converted</label>
-          </div>
-          <div class="radio-pill outcome-pill">
-            <input type="radio" name="outcome" id="outcome_pending" value="Pending">
-            <label for="outcome_pending" class="pending">Pending</label>
-          </div>
-          <div class="radio-pill outcome-pill">
-            <input type="radio" name="outcome" id="outcome_lost" value="Lost">
-            <label for="outcome_lost" class="lost">Lost</label>
-          </div>
-        </div>
-
-        <!-- Converted sub-options -->
-        <div class="conditional" id="convertedOptions">
-          <div class="conditional-card">
-            <div class="card-title">Purchase Stage</div>
-            <div class="radio-group">
-              <div class="radio-pill">
-                <input type="radio" name="stage" id="stage1" value="Stage 1">
-                <label for="stage1">Stage 1 — First Time Purchase</label>
-              </div>
-              <div class="radio-pill">
-                <input type="radio" name="stage" id="stage2" value="Stage 2">
-                <label for="stage2">Stage 2 — Returning Patient</label>
-              </div>
-            </div>
-          </div>
+        <div class="radio-group">
+          <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_converted" value="Converted" required><label for="outcome_converted" class="converted">✅ Converted</label></div>
+          <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_pending" value="Pending"><label for="outcome_pending" class="pending">⏳ Pending</label></div>
+          <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_lost" value="Lost"><label for="outcome_lost" class="lost">❌ Did Not Convert</label></div>
         </div>
       </div>
     </div>
 
-    <!-- Additional Options -->
+    <!-- Previous Purchase -->
     <div class="card">
-      <div class="card-title">Additional Options</div>
+      <div class="card-title">Previous Package Purchase</div>
       <div class="field">
-        <label>Appropriate for Rehab Essentials Emails?</label>
+        <label>Has this person purchased a package from us previously?</label>
         <div class="radio-group">
-          <div class="radio-pill">
-            <input type="radio" name="rehab_essentials" id="rehab_yes" value="Yes" required>
-            <label for="rehab_yes">Yes</label>
-          </div>
-          <div class="radio-pill">
-            <input type="radio" name="rehab_essentials" id="rehab_no" value="No">
-            <label for="rehab_no">No</label>
-          </div>
+          <div class="radio-pill"><input type="radio" name="previous_purchase" id="prev_yes" value="Yes" required><label for="prev_yes">Yes</label></div>
+          <div class="radio-pill"><input type="radio" name="previous_purchase" id="prev_no" value="No"><label for="prev_no">No</label></div>
         </div>
       </div>
+    </div>
 
+    <!-- Check-In Text -->
+    <div class="card">
+      <div class="card-title">Post-Eval Check-In Text</div>
       <div class="field">
-        <label>Send Post-Eval Check-In Text?</label>
+        <label>Send a check-in text to this patient?</label>
         <div class="radio-group">
-          <div class="radio-pill">
-            <input type="radio" name="send_checkin" id="checkin_yes" value="Yes" required>
-            <label for="checkin_yes">Yes</label>
-          </div>
-          <div class="radio-pill">
-            <input type="radio" name="send_checkin" id="checkin_no" value="No">
-            <label for="checkin_no">No</label>
-          </div>
+          <div class="radio-pill"><input type="radio" name="send_checkin" id="checkin_yes" value="Yes" required><label for="checkin_yes">Yes</label></div>
+          <div class="radio-pill"><input type="radio" name="send_checkin" id="checkin_no" value="No"><label for="checkin_no">No</label></div>
         </div>
-        <div class="conditional" id="checkinTextBox">
-          <div class="conditional-card">
-            <div class="card-title">Check-In Message</div>
-            <textarea name="checkin_text" placeholder="Write your check-in message here...&#10;&#10;Example: Hey! It's [Name] here from The Movement Clinic. I wanted to see how you're feeling after our session. Give me an update when you get a chance." rows="5"></textarea>
-          </div>
-        </div>
+      </div>
+      <div class="field">
+        <label>Check-In Message <span style="font-weight:400;color:var(--muted);">(leave blank if No)</span></label>
+        <textarea name="checkin_text" placeholder="Write your check-in message here..." rows="4"></textarea>
       </div>
     </div>
 
@@ -2684,65 +2507,42 @@ app.get('/post-eval', (req, res) => {
     <div class="card">
       <div class="card-title">Evaluation Transcript</div>
       <div class="field">
-        <textarea name="transcript" required placeholder="Paste the full evaluation transcript here..." rows="12"></textarea>
+        <textarea name="transcript" required placeholder="Paste the full evaluation transcript here..." rows="14"></textarea>
       </div>
     </div>
 
     <button type="submit" class="submit-btn" id="submitBtn">Submit Evaluation</button>
     <div class="status" id="statusMsg"></div>
-
   </form>
 </div>
-
 <script>
-  // Conditional logic
+  // Pre-fill from URL params (Slack button)
+  (function() {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get('first')) document.querySelector('[name="patient_first_name"]').value = p.get('first');
+    if (p.get('last'))  document.querySelector('[name="patient_last_name"]').value  = p.get('last');
+    if (p.get('phone')) document.querySelector('[name="patient_phone"]').value       = p.get('phone');
+    if (p.get('email')) document.querySelector('[name="patient_email"]').value       = p.get('email');
+  })();
+
   // Outcome banner
-  document.querySelectorAll('input[name="outcome"]').forEach(radio => {
-    radio.addEventListener('change', function() {
+  document.querySelectorAll('input[name="outcome"]').forEach(r => {
+    r.addEventListener('change', function() {
       const banner = document.getElementById('outcomeBanner');
-      const config = {
-        'Converted': { text: '✅ CONVERTED', bg: '#dcfce7', color: '#15803d', border: '#16a34a' },
-        'Pending': { text: '⏳ PENDING', bg: '#fef9c3', color: '#b45309', border: '#d97706' },
-        'Lost': { text: '❌ DID NOT CONVERT', bg: '#fee2e2', color: '#b91c1c', border: '#dc2626' }
+      const cfg = {
+        'Converted': { text: '✅ CONVERTED',        bg: '#dcfce7', color: '#15803d', border: '#16a34a' },
+        'Pending':   { text: '⏳ PENDING',           bg: '#fef9c3', color: '#b45309', border: '#d97706' },
+        'Lost':      { text: '❌ DID NOT CONVERT',   bg: '#fee2e2', color: '#b91c1c', border: '#dc2626' }
       };
-      const c = config[this.value];
+      const c = cfg[this.value];
       if (c) {
-        banner.style.display = 'block';
-        banner.style.background = c.bg;
-        banner.style.color = c.color;
-        banner.style.border = '2px solid ' + c.border;
+        Object.assign(banner.style, { display:'block', background:c.bg, color:c.color, border:'2px solid '+c.border });
         banner.textContent = c.text;
       }
     });
   });
 
-  document.querySelectorAll('input[name="outcome"]').forEach(radio => {
-    radio.addEventListener('change', function() {
-      document.getElementById('convertedOptions').classList.toggle('visible', this.value === 'Converted');
-    });
-  });
-
-  document.querySelectorAll('input[name="send_checkin"]').forEach(radio => {
-    radio.addEventListener('change', function() {
-      document.getElementById('checkinTextBox').classList.toggle('visible', this.value === 'Yes');
-    });
-  });
-  // Show on load if pre-selected
-  const checkinSelected = document.querySelector('input[name="send_checkin"]:checked');
-  if (checkinSelected && checkinSelected.value === 'Yes') {
-    document.getElementById('checkinTextBox').classList.add('visible');
-  }
-
-  // Form submission
-  // Pre-fill form from URL parameters (set by Slack deals board button)
-  (function() {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('first')) document.querySelector('[name="patient_first_name"]').value = params.get('first');
-    if (params.get('last')) document.querySelector('[name="patient_last_name"]').value = params.get('last');
-    if (params.get('phone')) document.querySelector('[name="patient_phone"]').value = params.get('phone');
-    if (params.get('email')) document.querySelector('[name="patient_email"]').value = params.get('email');
-  })();
-
+  // Form submit
   document.getElementById('evalForm').addEventListener('submit', async function(e) {
     e.preventDefault();
     const btn = document.getElementById('submitBtn');
@@ -2750,15 +2550,14 @@ app.get('/post-eval', (req, res) => {
     btn.disabled = true;
     btn.textContent = 'Processing...';
     status.className = 'status loading';
-    status.textContent = 'This takes about 90 seconds. Go ahead and close this page when you're ready. Things will continue to process in the background.';
+    status.style.display = 'block';
+    status.textContent = 'Submitting — this takes about 90 seconds. You can close this page; processing continues in the background.';
 
     const data = Object.fromEntries(new FormData(this));
-
     try {
       const res = await fetch('/post-eval', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        credentials: 'omit',
         body: JSON.stringify(data)
       });
       const result = await res.json();
@@ -2766,7 +2565,7 @@ app.get('/post-eval', (req, res) => {
         status.className = 'status success';
         status.textContent = 'Evaluation submitted successfully. GHL has been updated.';
         this.reset();
-        document.querySelectorAll('.conditional').forEach(el => el.classList.remove('visible'));
+        document.getElementById('outcomeBanner').style.display = 'none';
       } else {
         throw new Error(result.error || 'Unknown error');
       }
@@ -2774,7 +2573,6 @@ app.get('/post-eval', (req, res) => {
       status.className = 'status error';
       status.textContent = 'Something went wrong: ' + err.message + '. Please try again or contact Jordan.';
     }
-
     btn.disabled = false;
     btn.textContent = 'Submit Evaluation';
   });
@@ -2792,9 +2590,9 @@ app.post('/post-eval', async (req, res) => {
       patient_email,
       patient_phone,
       evaluating_pt,
+      plan_of_care_pt: plan_of_care_pt_form,
+      previous_purchase,
       outcome,
-      stage,
-      rehab_essentials,
       send_checkin,
       checkin_text,
       transcript
@@ -2858,8 +2656,11 @@ app.post('/post-eval', async (req, res) => {
     const claudeResult = await analyzeEvalWithClaude(transcript, outcome);
     console.log(`Claude eval analysis complete: pending_subtype=${claudeResult.pending_subtype}`);
 
+    // Determine purchase stage from form question (overrides Claude's guess)
+    const purchaseStage = previous_purchase === 'Yes' ? 'Stage 2' : previous_purchase === 'No' ? 'Stage 1' : purchaseStage || null;
+
     const ptInfo = PT_CALENDARS[evaluating_pt] || {};
-    const planOfCarePT = claudeResult.plan_of_care_pt || evaluating_pt;
+    const planOfCarePT = plan_of_care_pt_form || claudeResult.plan_of_care_pt || evaluating_pt;
     const timestamp = getTimestamp();
     const patientFullName = `${patient_first_name} ${patient_last_name}`;
 
@@ -2869,17 +2670,17 @@ app.post('/post-eval', async (req, res) => {
     if (customerOppCreated) noteLines.push('ℹ️ Customer Pipeline opportunity auto-created (no existing card found).');
 
     if (outcome === 'Converted') {
-      noteLines.push(`Purchase Stage: ${stage}`);
+      noteLines.push(`Purchase Stage: ${purchaseStage || "Unclear from transcript"}`);
       if (claudeResult.next_steps) noteLines.push(`Next Steps: ${claudeResult.next_steps}`);
 
-      if (stage === 'Stage 1') {
+      if (purchaseStage === 'Stage 1') {
         // Stage 1 — move Customer Pipeline card to Package Purchased
         newStageId = EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED;
         await sendSMSWithinHours(patient_phone, STAGE1_TEXT(patient_first_name));
         noteLines.push('✅ Customer Pipeline moved to Package Purchased.');
         noteLines.push('✅ Stage 1 superbill/physician text sent via Quo.');
 
-      } else if (stage === 'Stage 2') {
+      } else if (purchaseStage === 'Stage 2') {
         // Stage 2 — Customer Pipeline card should already be at Package Purchased
         // Check if it is — if not, update it
         const isAlreadyPurchased = customerOpp.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED;
@@ -2985,23 +2786,6 @@ app.post('/post-eval', async (req, res) => {
     await addNoteToContact(contact.id, noteLines.join('\n'));
     console.log('Note added to contact');
 
-    // Rehab Essentials webhook
-    if (rehab_essentials === 'Yes') {
-      try {
-        await axios.post(REHAB_ESSENTIALS_WEBHOOK, {
-          contact_id: contact.id,
-          patient_first_name,
-          patient_last_name,
-          patient_email,
-          patient_phone,
-          evaluating_pt
-        }, { headers: { 'Content-Type': 'application/json' } });
-        console.log('Rehab Essentials webhook fired');
-      } catch (err) {
-        console.error('Failed to fire Rehab Essentials webhook:', err.message);
-      }
-    }
-
     // Check-in text is handled by GHL workflow (48hr delay) — Railway fires the trigger webhook only
     // The GHL workflow handles the actual Quo SMS send with 48hr wait built in
     if (send_checkin === 'Yes' && checkin_text && checkin_text.trim() && process.env.CHECKIN_WEBHOOK) {
@@ -3029,7 +2813,7 @@ app.post('/post-eval', async (req, res) => {
         evaluating_pt: String(evaluating_pt || ''),
         plan_of_care_pt: String(planOfCarePT || ''),
         outcome: String(outcome || ''),
-        stage: String(stage || 'N/A'),
+        stage: String(purchaseStage || 'N/A'),
         evaluation_date: new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }),
         rehab_essentials: String(rehab_essentials || ''),
         send_checkin_text_question: String(send_checkin || ''),
@@ -3046,7 +2830,7 @@ app.post('/post-eval', async (req, res) => {
         red_flags: String(claudeResult.red_flags || 'None identified.'),
         coaching_notes: String(claudeResult.coaching_notes || ''),
         calendar_appointment_created: String(claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date ? 'Yes' : 'No'),
-        continuity_pipeline_created: String(stage === 'Stage 2' ? 'Yes' : 'No')
+        continuity_pipeline_created: String(purchaseStage === 'Stage 2' ? 'Yes' : 'No')
       }, { headers: { 'Content-Type': 'application/json' } });
       console.log('Sheet logger webhook fired');
     } catch (err) {
@@ -3061,7 +2845,7 @@ app.post('/post-eval', async (req, res) => {
 
   <table style="width:100%; border-collapse:collapse; background:#eaf4ff; margin-bottom:20px;">
     <tr><td style="padding:14px 16px; border-left:4px solid #2563eb; font-size:14px; font-weight:600; color:#1e3a5f;">
-      Post-Eval Outcome: ${outcome}${stage ? ' — ' + stage : ''}
+      Post-Eval Outcome: ${outcome}${purchaseStage ? ' — ' + purchaseStage : ''}
     </td></tr>
   </table>
 
@@ -3078,13 +2862,12 @@ app.post('/post-eval', async (req, res) => {
   <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; width:45%; border-bottom:1px solid #f0f0f0;">Pipeline</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">Customer Pipeline</td></tr>
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Stage Updated To</td><td style="padding:9px 0; font-size:13px; font-weight:600; color:#0f6e56; border-bottom:1px solid #f0f0f0;">${outcome === 'Converted' ? 'Package Purchased' : outcome === 'Lost' ? 'Closed/Lost' : claudeResult.pending_subtype === 'PENDING_CALL' ? 'Pending - Follow Up Phone Call Booked' : claudeResult.pending_subtype === 'PENDING_VISIT' ? 'Pending - Follow Up Visit Booked' : 'Not a Good Time - Needs Follow Up'}</td></tr>
-    ${stage === 'Stage 2' ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Continuity Pipeline</td><td style="padding:9px 0; font-size:13px; color:#0f6e56; border-bottom:1px solid #f0f0f0;">✅ New opportunity created at Continuity Purchased</td></tr>' : ''}
+    ${purchaseStage === 'Stage 2' ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Continuity Pipeline</td><td style="padding:9px 0; font-size:13px; color:#0f6e56; border-bottom:1px solid #f0f0f0;">✅ New opportunity created at Continuity Purchased</td></tr>' : ''}
     ${claudeResult.follow_up_call_date ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Follow Up Call</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.follow_up_call_date + ' at ' + claudeResult.follow_up_call_time + ' — Calendar appointment created</td></tr>' : ''}
     ${claudeResult.follow_up_visit_date ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Follow Up Visit</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.follow_up_visit_date + '</td></tr>' : ''}
     ${claudeResult.objection_category ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Objection Category</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.objection_category + '</td></tr>' : ''}
     ${claudeResult.objection_detail ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Objection Detail</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.objection_detail + '</td></tr>' : ''}
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Note Added</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">Yes</td></tr>
-    <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Rehab Essentials</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">${rehab_essentials}</td></tr>
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666;">Check-In Text Requested</td><td style="padding:9px 0; font-size:13px; color:#333333;">${send_checkin}</td></tr>
   </table>
 
@@ -3100,13 +2883,13 @@ app.post('/post-eval', async (req, res) => {
       evaluating_pt: String(evaluating_pt || ''),
       plan_of_care_pt: String(planOfCarePT || ''),
       outcome: String(outcome || ''),
-      stage: String(stage || 'N/A'),
+      stage: String(purchaseStage || 'N/A'),
       payment_method: String(claudeResult.payment_method || 'Unclear from transcript'),
       evaluation_summary: String(claudeResult.evaluation_summary || ''),
       next_steps: String(claudeResult.next_steps || ''),
       red_flags: String(claudeResult.red_flags || 'None identified.'),
       calendar_appointment_created: String(claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date ? 'Yes — ' + claudeResult.follow_up_call_date + ' at ' + claudeResult.follow_up_call_time : 'No'),
-      continuity_opportunity_created: String(stage === 'Stage 2' ? 'Yes — Continuity Purchased' : 'No'),
+      continuity_opportunity_created: String(purchaseStage === 'Stage 2' ? 'Yes — Continuity Purchased' : 'No'),
       rehab_essentials: String(rehab_essentials || ''),
       checkin_text_scheduled: String(send_checkin || ''),
       send_checkin_text: String(send_checkin || ''),
@@ -3126,7 +2909,7 @@ app.post('/post-eval', async (req, res) => {
         evaluatingPT: evaluating_pt,
         planOfCarePT: planOfCarePT,
         outcome,
-        stage: stage || null,
+        stage: purchaseStage || null,
         paymentMethod: claudeResult.payment_method || 'Unclear from transcript',
         evaluationSummary: claudeResult.evaluation_summary || '',
         nextSteps: claudeResult.next_steps || '',
@@ -3143,7 +2926,7 @@ app.post('/post-eval', async (req, res) => {
       });
       console.log('Eval email content generated — sending...');
 
-      const evalSubject = 'Post-Eval Summary — ' + patientFullName + ' (' + outcome + (stage ? ' ' + stage : '') + ')';
+      const evalSubject = 'Post-Eval Summary — ' + patientFullName + ' (' + outcome + (purchaseStage ? ' ' + purchaseStage : '') + ')';
 
       // Team email — no coaching notes, sent immediately
       await sendEmailAndSlack({
@@ -3187,11 +2970,86 @@ app.post('/post-eval', async (req, res) => {
       });
       await sendSlackMessage(evalBlocks);
 
+      // Post outcome summary to deals board channel
+      try {
+        const outcomeEmoji = outcome === 'Converted' ? '✅' : outcome === 'Pending' ? '⏳' : '❌';
+        const outcomeLabel = outcome === 'Converted' ? 'CONVERTED' : outcome === 'Pending' ? 'PENDING' : 'DID NOT CONVERT';
+        const ghlOppUrl = customerOpp
+          ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + customerOpp.id
+          : null;
+        const nameDisplay = ghlOppUrl
+          ? '<' + ghlOppUrl + '|' + capitalizeFullName(patientFullName) + '>'
+          : capitalizeFullName(patientFullName);
+
+        const dealsBlocks = [
+          {
+            type: 'header',
+            text: { type: 'plain_text', text: outcomeEmoji + ' Post-Eval — ' + outcomeLabel, emoji: true }
+          },
+          {
+            type: 'section',
+            fields: [
+              { type: 'mrkdwn', text: '*Patient*\n' + nameDisplay },
+              { type: 'mrkdwn', text: '*Phone*\n' + (patient_phone || 'Unknown') }
+            ]
+          },
+          {
+            type: 'section',
+            fields: [
+              { type: 'mrkdwn', text: '*Evaluating PT*\n' + evaluating_pt },
+              { type: 'mrkdwn', text: '*Plan of Care PT*\n' + planOfCarePT }
+            ]
+          }
+        ];
+
+        // Objections (Lost)
+        if (outcome === 'Lost' && claudeResult.objection_category) {
+          dealsBlocks.push({
+            type: 'section',
+            text: { type: 'mrkdwn', text: '*Objection*\n' + claudeResult.objection_category + (claudeResult.objection_detail ? '\n' + claudeResult.objection_detail : '') }
+          });
+        }
+
+        // Follow-up details (Pending)
+        if (outcome === 'Pending') {
+          let followUpText = '';
+          if (claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date) {
+            followUpText = 'Follow-Up Call: ' + claudeResult.follow_up_call_date + (claudeResult.follow_up_call_time ? ' at ' + claudeResult.follow_up_call_time : '') + ' — Calendar invite created';
+          } else if (claudeResult.pending_subtype === 'PENDING_VISIT' && claudeResult.follow_up_visit_date) {
+            followUpText = 'Follow-Up Visit: ' + claudeResult.follow_up_visit_date;
+          } else {
+            followUpText = 'No firm follow-up time established — task created for PT';
+          }
+          dealsBlocks.push({
+            type: 'section',
+            text: { type: 'mrkdwn', text: '*Follow-Up*\n' + followUpText }
+          });
+        }
+
+        // Red flags
+        const hasRedFlag = claudeResult.red_flags && claudeResult.red_flags !== 'None' && claudeResult.red_flags !== 'None identified.';
+        if (hasRedFlag) {
+          dealsBlocks.push({
+            type: 'section',
+            text: { type: 'mrkdwn', text: ':warning: *Red Flag*\n' + claudeResult.red_flags }
+          });
+        }
+
+        await axios.post('https://slack.com/api/chat.postMessage', {
+          channel: SLACK_DEALS_CHANNEL_ID,
+          text: outcomeEmoji + ' Post-Eval ' + outcomeLabel + ' — ' + patientFullName,
+          blocks: dealsBlocks
+        }, { headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' } });
+        console.log('Deals board post-eval summary posted');
+      } catch (dealsErr) {
+        console.error('Deals board post-eval Slack failed:', dealsErr.message);
+      }
+
       // Log to Redis for daily digest
       await logEventToRedis({
         type: 'Evaluation',
         contact: patientFullName + ' ' + patient_phone,
-        summary: outcome + (stage ? ' ' + stage : '') + ' — PT: ' + evaluating_pt + ' — ' + (claudeResult.next_steps || 'No next steps')
+        summary: outcome + ' — PT: ' + evaluating_pt + ' — ' + (claudeResult.next_steps || 'No next steps')
       });
 
     } catch (emailErr) {
