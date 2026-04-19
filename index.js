@@ -16,7 +16,8 @@ const GHL_SUMMARY_WEBHOOK = process.env.GHL_SUMMARY_WEBHOOK;
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
-const SLACK_DEALS_CHANNEL_ID = 'C07T7PK0GAE';
+const SLACK_EVALS_SCHEDULED_CHANNEL_ID = 'C07T7PK0GAE';
+const SLACK_CONVERSIONS_CHANNEL_ID = 'C0AU8CDTN4R';
 const RAILWAY_FORM_URL = process.env.RAILWAY_STATIC_URL ? 'https://' + process.env.RAILWAY_STATIC_URL + '/post-eval' : null;
 
 // Slack user IDs for PT tagging
@@ -1162,7 +1163,7 @@ Return ONLY valid JSON:
 }
 
 async function generateEvalEmailContent(params) {
-  const { contactName, contactPhone, evaluatingPT, planOfCarePT, outcome, stage, paymentMethod, evaluationSummary, nextSteps, redFlags, calendarCreated, continuityCreated, rehabEssentials, checkinScheduled, objectionCategory, objectionDetail, physicianName, physicianOffice, coachingNotes } = params;
+  const { contactName, contactPhone, evaluatingPT, planOfCarePT, outcome, stage, paymentMethod, problemSummary, treatmentPlan, evaluationSummary, nextSteps, redFlags, calendarCreated, continuityCreated, checkinScheduled, objectionCategory, objectionDetail, physicianName, physicianOffice, coachingNotes } = params;
 
   const prompt = `You are writing post-evaluation summary emails for Movement Clinic Physical Therapy. Based on the data below, write two HTML emails and a Slack message.
 
@@ -1172,33 +1173,32 @@ EVALUATION DATA:
 - Evaluating PT: ${evaluatingPT}
 - Plan of Care PT: ${planOfCarePT}
 - Payment Method: ${paymentMethod || 'Unclear from transcript'}
-- Evaluation Summary: ${evaluationSummary || 'Not available'}
 - Next Steps: ${nextSteps || 'Not established'}
 - Objection: ${objectionCategory ? objectionCategory + ' — ' + (objectionDetail || '') : 'None'}
 - Calendar Appointment Created: ${calendarCreated || 'No'}
 - Continuity Pipeline Card Created: ${continuityCreated || 'No'}
-- Rehab Essentials Enrolled: ${rehabEssentials || 'No'}
 - Check-In Text Scheduled: ${checkinScheduled || 'No'}
 - Physician: ${physicianName ? physicianName + (physicianOffice ? ' — ' + physicianOffice : '') : 'None mentioned'}
 - Red Flags: ${redFlags || 'None identified'}
+- What Was the Problem: ${problemSummary || 'Not available'}
+- What Is the Treatment Plan: ${treatmentPlan || 'Not available'}
 - Coaching Notes (Jordan only): ${coachingNotes || 'None'}
 
-Write THREE things:
+Write TWO things:
 
-1. TEAM EMAIL (no coaching notes) — HTML with inline styles, Montserrat font, max 600px:
+1. TEAM EMAIL — HTML with inline styles, Montserrat font, max 600px:
    - Outcome banner (blue left border)
-   - EVALUATION SUMMARY section
    - NEXT STEPS section
-   - GHL ACTIONS TAKEN section: table with Payment Method, Calendar Appointment, Continuity Pipeline, Rehab Essentials, Check-In Text, Objection if applicable, Physician if applicable
+   - GHL ACTIONS TAKEN section: table with Payment Method, Calendar Appointment, Continuity Pipeline, Check-In Text, Objection if applicable, Physician if applicable
    - RED FLAGS box (amber left border, always show)
 
-2. JORDAN EMAIL (includes coaching notes) — same as team email but add:
-   - COACHING NOTES section at bottom (indigo left border)
-
-3. SLACK MESSAGE — 3-5 lines plain text: patient name, outcome, key action, red flag if any
+2. JORDAN EMAIL — same as team email but add THREE extra sections:
+   - WHAT WAS THE PROBLEM section (green left border): problem summary including body region, injury history, long-term goals
+   - WHAT IS THE PLAN section (teal left border): treatment plan, recommendations, exercises discussed
+   - COACHING NOTES section at bottom (indigo left border): honest assessment of sales process, objection handling, presentation quality, and any specific improvement advice
 
 Return ONLY valid JSON:
-{"team_email_html": "complete HTML", "jordan_email_html": "complete HTML with coaching", "slack_message": "plain text"}`;
+{"team_email_html": "complete HTML", "jordan_email_html": "complete HTML with clinical and coaching sections"}`;
 
   const response = await axios.post(
     'https://api.anthropic.com/v1/messages',
@@ -1712,7 +1712,7 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       }
 
       try {
-        const dealPayload = { channel: SLACK_DEALS_CHANNEL_ID, text: dealMsg.fallback, blocks: dealMsg.blocks };
+        const dealPayload = { channel: SLACK_EVALS_SCHEDULED_CHANNEL_ID, text: dealMsg.fallback, blocks: dealMsg.blocks };
         await axios.post('https://slack.com/api/chat.postMessage', dealPayload, {
           headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
         });
@@ -2132,20 +2132,23 @@ EXTRACT THE FOLLOWING:
 
 7. next_steps: 1-2 sentence summary of what was agreed upon as the next touch point
 
-8. evaluation_summary: 2-3 sentence summary of the evaluation — what the patient came in for, what was assessed, and what the PT recommended. Clinical but concise.
+8. problem_summary: Summary of the patient's presenting problem for Jordan's eyes only. Include: body region(s) being addressed, relevant injury/symptom history mentioned, and the patient's stated long-term goals. 3-5 sentences. Clinical but accessible.
 
-9. physician_name: name of any physician mentioned, otherwise null
+9. treatment_plan: Summary of the immediate treatment plan, clinical recommendations, and any exercises or modalities discussed during the eval. Base this only on what is explicitly mentioned in the transcript. 3-5 sentences.
 
-10. physician_office: office or practice of physician if mentioned, otherwise null
+10. physician_name: name of any physician mentioned, otherwise null
 
-11. COACHING NOTES: Provide specific, actionable observations about the PT's sales and communication performance. Focus on:
-    - How objections were handled (or not handled)
+11. physician_office: office or practice of physician if mentioned, otherwise null
+
+12. COACHING NOTES: Provide a specific, honest assessment of the PT's sales process, presentation quality, and objection handling. This is for Jordan's use to identify patterns across PTs over time. Cover:
+    - How objections were handled (or not handled) — be specific about what was said
     - Whether value was clearly communicated before price was discussed
     - Whether the PT established clear next steps ("book a meeting from a meeting")
     - Quality of rapport building and active listening
     - Any missed opportunities to address patient concerns
     - What was done well
-    Be specific — reference actual moments from the transcript. 2-4 bullet points. If the conversion was clean with no issues, note what the PT did well. Format as plain text with each point on a new line starting with a dash.
+    - If there are obvious improvements to their sales flow or presentation, state them directly and briefly
+    Be specific — reference actual moments from the transcript. 3-5 bullet points. Format as plain text with each point on a new line starting with a dash.
 
 12. RED FLAGS: Note anything that warrants Jordan's immediate attention:
     - Patient expressed frustration, upset, or left abruptly
@@ -2169,6 +2172,8 @@ RETURN ONLY valid JSON with no preamble or markdown:
   "objection_category": null,
   "objection_detail": null,
   "next_steps": null,
+  "problem_summary": null,
+  "treatment_plan": null,
   "evaluation_summary": null,
   "physician_name": null,
   "physician_office": null,
@@ -2473,7 +2478,7 @@ app.get('/post-eval', (req, res) => {
   .outcome-pill input[type="radio"]:checked + label.converted { border-color: #059669; background: #d1fae5; color: #065f46; }
   .outcome-pill input[type="radio"]:checked + label.pending  { border-color: var(--warn); background: #fef3c7; color: #92400e; }
   .outcome-pill input[type="radio"]:checked + label.lost     { border-color: var(--danger); background: #fee2e2; color: #991b1b; }
-  .outcome-banner { display: none; padding: 16px 20px; border-radius: 8px; margin-bottom: 8px; font-size: 16px; font-weight: 700; text-align: center; letter-spacing: 0.5px; }
+  .outcome-banner { display: none; }
   .checkin-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
   .submit-btn {
     width: 100%; padding: 12px; background: var(--accent); color: #fff; border: none;
@@ -2487,6 +2492,11 @@ app.get('/post-eval', (req, res) => {
   .status.success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; display: block; }
   .status.error   { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
   .status.loading { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; display: block; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+  .three-col .card { margin-bottom: 0; }
+  .three-col .radio-group { flex-direction: column; }
+  .three-col .radio-pill label { justify-content: center; }
+  @media (max-width: 700px) { .three-col { grid-template-columns: 1fr; } .three-col .card { margin-bottom: 10px; } .three-col .radio-group { flex-direction: row; flex-wrap: wrap; } }
   @media (max-width: 500px) { .row-2 { grid-template-columns: 1fr; } .card { padding: 14px 16px; } }
 </style>
 </head>
@@ -2511,37 +2521,38 @@ app.get('/post-eval', (req, res) => {
       </div>
     </div>
 
-    <!-- Evaluating PT -->
-    <div class="card">
-      <div class="card-title">Evaluating Physical Therapist</div>
-      <div class="field">
-        <div class="radio-group">
-          ${evalPtButtons}
-        </div>
-      </div>
-    </div>
+    <!-- Evaluating PT + Plan of Care PT + Outcome — three column on desktop -->
+    <div class="three-col">
 
-    <!-- Plan of Care PT -->
-    <div class="card">
-      <div class="card-title">Plan of Care Physical Therapist</div>
-      <div class="field">
-        <div class="radio-group">
-          ${pocPtButtons}
+      <div class="card">
+        <div class="card-title">Evaluating PT</div>
+        <div class="field">
+          <div class="radio-group">
+            ${evalPtButtons}
+          </div>
         </div>
       </div>
-    </div>
 
-    <!-- Outcome -->
-    <div class="card">
-      <div class="card-title">Evaluation Outcome</div>
-      <div id="outcomeBanner" class="outcome-banner"></div>
-      <div class="field">
-        <div class="radio-group">
-          <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_converted" value="Converted" required><label for="outcome_converted" class="converted">✅ Converted</label></div>
-          <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_pending" value="Pending"><label for="outcome_pending" class="pending">⏳ Pending</label></div>
-          <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_lost" value="Lost"><label for="outcome_lost" class="lost">❌ Did Not Convert</label></div>
+      <div class="card">
+        <div class="card-title">Plan of Care PT</div>
+        <div class="field">
+          <div class="radio-group">
+            ${pocPtButtons}
+          </div>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-title">Outcome</div>
+        <div class="field">
+          <div class="radio-group">
+            <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_converted" value="Converted" required><label for="outcome_converted" class="converted">✅ Converted</label></div>
+            <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_pending" value="Pending"><label for="outcome_pending" class="pending">⏳ Pending</label></div>
+            <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_lost" value="Lost"><label for="outcome_lost" class="lost">❌ Did Not Convert</label></div>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <!-- Previous Purchase -->
@@ -2594,22 +2605,7 @@ app.get('/post-eval', (req, res) => {
     if (p.get('email')) document.querySelector('[name="patient_email"]').value       = p.get('email');
   })();
 
-  // Outcome banner
-  document.querySelectorAll('input[name="outcome"]').forEach(r => {
-    r.addEventListener('change', function() {
-      const banner = document.getElementById('outcomeBanner');
-      const cfg = {
-        'Converted': { text: '✅ CONVERTED',        bg: '#dcfce7', color: '#15803d', border: '#16a34a' },
-        'Pending':   { text: '⏳ PENDING',           bg: '#fef9c3', color: '#b45309', border: '#d97706' },
-        'Lost':      { text: '❌ DID NOT CONVERT',   bg: '#fee2e2', color: '#b91c1c', border: '#dc2626' }
-      };
-      const c = cfg[this.value];
-      if (c) {
-        Object.assign(banner.style, { display:'block', background:c.bg, color:c.color, border:'2px solid '+c.border });
-        banner.textContent = c.text;
-      }
-    });
-  });
+
 
   // Form submit
   document.getElementById('evalForm').addEventListener('submit', async function(e) {
@@ -3021,12 +3017,13 @@ app.post('/post-eval', async (req, res) => {
         outcome,
         stage: purchaseStage || null,
         paymentMethod: claudeResult.payment_method || 'Unclear from transcript',
+        problemSummary: claudeResult.problem_summary || '',
+        treatmentPlan: claudeResult.treatment_plan || '',
         evaluationSummary: claudeResult.evaluation_summary || '',
         nextSteps: claudeResult.next_steps || '',
         redFlags: claudeResult.red_flags || 'None identified.',
         calendarCreated: evalWebhookPayload.calendar_appointment_created,
         continuityCreated: evalWebhookPayload.continuity_opportunity_created,
-        rehabEssentials: 'N/A',
         checkinScheduled: send_checkin,
         objectionCategory: claudeResult.objection_category || null,
         objectionDetail: claudeResult.objection_detail || null,
@@ -3073,7 +3070,7 @@ app.post('/post-eval', async (req, res) => {
         evalDate: getTimestamp(),
         evaluatingPT: evaluating_pt,
         planOfCarePT: planOfCarePT,
-        outcome: claudeResult.evaluation_summary || claudeResult.next_steps || 'See email for full details',
+        outcome: claudeResult.next_steps || 'See email for full details',
         stageDisplay: evalStageDisplay,
         redFlags: claudeResult.red_flags || 'None',
         opportunityId: customerOpp ? customerOpp.id : null
@@ -3091,11 +3088,24 @@ app.post('/post-eval', async (req, res) => {
           ? '<' + ghlOppUrl + '|' + capitalizeFullName(patientFullName) + '>'
           : capitalizeFullName(patientFullName);
 
+        // Outcome color coding
+        const outcomeColor = outcome === 'Converted' ? '#059669' : outcome === 'Pending' ? '#d97706' : '#dc2626';
+        const outcomeText = outcome === 'Converted'
+          ? '*✅ CONVERTED*'
+          : outcome === 'Pending'
+            ? (claudeResult.pending_subtype === 'PENDING_CALL'
+                ? '*⏳ PENDING — FOLLOW UP PHONE CALL*'
+                : claudeResult.pending_subtype === 'PENDING_VISIT'
+                  ? '*⏳ PENDING — FOLLOW UP VISIT*'
+                  : '*⏳ PENDING — NO FIRM DATE*')
+            : '*❌ DID NOT CONVERT*';
+
         const dealsBlocks = [
           {
-            type: 'header',
-            text: { type: 'plain_text', text: outcomeEmoji + ' Post-Eval — ' + outcomeLabel, emoji: true }
+            type: 'section',
+            text: { type: 'mrkdwn', text: outcomeText }
           },
+          { type: 'divider' },
           {
             type: 'section',
             fields: [
@@ -3146,11 +3156,11 @@ app.post('/post-eval', async (req, res) => {
         }
 
         await axios.post('https://slack.com/api/chat.postMessage', {
-          channel: SLACK_DEALS_CHANNEL_ID,
+          channel: SLACK_CONVERSIONS_CHANNEL_ID,
           text: outcomeEmoji + ' Post-Eval ' + outcomeLabel + ' — ' + patientFullName,
           blocks: dealsBlocks
         }, { headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' } });
-        console.log('Deals board post-eval summary posted');
+        console.log('Post-eval conversions Slack message posted');
       } catch (dealsErr) {
         console.error('Deals board post-eval Slack failed:', dealsErr.message);
       }
