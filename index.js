@@ -17,7 +17,7 @@ const RESEND_API_KEY = process.env.RESEND_API_KEY;
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
 const SLACK_DEALS_CHANNEL_ID = 'C07T7PK0GAE';
-const RAILWAY_FORM_URL = process.env.RAILWAY_STATIC_URL ? 'https://' + process.env.RAILWAY_STATIC_URL + '/post-eval' : null;
+const GOOGLE_FORM_URL = 'https://docs.google.com/forms/d/e/1FAIpQLSdAsFSHugQQ9HRgrOmfiktbrmNOF4ixBrW6-qklebQQgfrghQ/viewform';
 
 // Slack user IDs for PT tagging
 const SLACK_USER_MAP = {
@@ -1671,14 +1671,12 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       const patientEmail = claudeResult.extracted_email || (contact ? contact.email : null) || '';
       const patientFirstName = finalContactName ? capitalizeFullName(finalContactName).split(' ')[0] : '';
       const patientLastName = finalContactName ? capitalizeFullName(finalContactName).split(' ').slice(1).join(' ') : '';
-      const formUrl = RAILWAY_FORM_URL
-        ? RAILWAY_FORM_URL +
-          '?first=' + encodeURIComponent(patientFirstName) +
-          '&last=' + encodeURIComponent(patientLastName) +
-          '&phone=' + encodeURIComponent(contactPhone || '') +
-          '&email=' + encodeURIComponent(patientEmail)
-        : null;
-      console.log('Deals board form URL:', formUrl || 'RAILWAY_FORM_URL not set');
+      const formUrl = GOOGLE_FORM_URL +
+        '?entry.2109735758=' + encodeURIComponent(patientFirstName) +
+        '&entry.1083584090=' + encodeURIComponent(patientLastName) +
+        '&entry.447167402=' + encodeURIComponent(patientEmail) +
+        '&entry.2021432687=' + encodeURIComponent(contactPhone || '');
+      console.log('Deals board form URL:', formUrl);
 
       const dealMsg = {
         fallback: 'New Eval Booked — ' + capitalizeFullName(finalContactName),
