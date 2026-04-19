@@ -2505,7 +2505,7 @@ app.get('/post-eval', (req, res) => {
     transition: border-color 0.15s; outline: none;
   }
   input:focus, textarea:focus { border-color: var(--accent); }
-  textarea { resize: vertical; min-height: 160px; line-height: 1.6; }
+  textarea { resize: vertical; min-height: 80px; line-height: 1.6; }
   .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
   .radio-pill input[type="radio"] { display: none; }
@@ -2619,7 +2619,7 @@ app.get('/post-eval', (req, res) => {
       </div>
       <div class="field">
         <label>Check-In Message <span style="font-weight:400;color:var(--muted);">(leave blank if No)</span></label>
-        <textarea name="checkin_text" placeholder="Write your check-in message here..." rows="4"></textarea>
+        <textarea name="checkin_text" placeholder="Write your check-in message here..." rows="3"></textarea>
       </div>
     </div>
 
@@ -2627,7 +2627,7 @@ app.get('/post-eval', (req, res) => {
     <div class="card">
       <div class="card-title">Evaluation Transcript</div>
       <div class="field">
-        <textarea name="transcript" required placeholder="Paste the full evaluation transcript here..." rows="14"></textarea>
+        <textarea name="transcript" required placeholder="Paste the full evaluation transcript here..." rows="7"></textarea>
       </div>
     </div>
 
