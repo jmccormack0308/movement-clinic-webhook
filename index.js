@@ -1675,7 +1675,7 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
         '?entry.2109735758=' + encodeURIComponent(patientFirstName) +
         '&entry.1083584090=' + encodeURIComponent(patientLastName) +
         '&entry.447167402=' + encodeURIComponent(patientEmail) +
-        '&entry.2021432687=' + encodeURIComponent(contactPhone || '');
+        '&entry.2021432687=' + encodeURIComponent((contactPhone || '').replace(/\D/g, ''));
       console.log('Deals board form URL:', formUrl);
 
       const dealMsg = {
