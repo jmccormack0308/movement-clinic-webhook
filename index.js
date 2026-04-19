@@ -1165,40 +1165,38 @@ Return ONLY valid JSON:
 async function generateEvalEmailContent(params) {
   const { contactName, contactPhone, evaluatingPT, planOfCarePT, outcome, stage, paymentMethod, problemSummary, treatmentPlan, evaluationSummary, nextSteps, redFlags, calendarCreated, continuityCreated, checkinScheduled, objectionCategory, objectionDetail, physicianName, physicianOffice, coachingNotes } = params;
 
-  const prompt = `You are writing post-evaluation summary emails for Movement Clinic Physical Therapy. Based on the data below, write two HTML emails and a Slack message.
+  const prompt = `Write two concise post-evaluation summary emails for Movement Clinic Physical Therapy. Be brief — no fluff, no long paragraphs. Every section should be scannable in under 10 seconds.
 
-EVALUATION DATA:
-- Patient: ${contactName} | ${contactPhone}
-- Outcome: ${outcome}${stage ? ' — ' + stage : ''}
-- Evaluating PT: ${evaluatingPT}
-- Plan of Care PT: ${planOfCarePT}
-- Payment Method: ${paymentMethod || 'Unclear from transcript'}
-- Next Steps: ${nextSteps || 'Not established'}
-- Objection: ${objectionCategory ? objectionCategory + ' — ' + (objectionDetail || '') : 'None'}
-- Calendar Appointment Created: ${calendarCreated || 'No'}
-- Continuity Pipeline Card Created: ${continuityCreated || 'No'}
-- Check-In Text Scheduled: ${checkinScheduled || 'No'}
-- Physician: ${physicianName ? physicianName + (physicianOffice ? ' — ' + physicianOffice : '') : 'None mentioned'}
-- Red Flags: ${redFlags || 'None identified'}
-- What Was the Problem: ${problemSummary || 'Not available'}
-- What Is the Treatment Plan: ${treatmentPlan || 'Not available'}
-- Coaching Notes (Jordan only): ${coachingNotes || 'None'}
+DATA:
+Patient: ${contactName} | ${contactPhone}
+Outcome: ${outcome}${stage ? ' — ' + stage : ''}
+Evaluating PT: ${evaluatingPT} | Plan of Care PT: ${planOfCarePT}
+Payment: ${paymentMethod || 'Unclear'}
+Next Steps: ${nextSteps || 'None'}
+Objection: ${objectionCategory ? objectionCategory + (objectionDetail ? ' — ' + objectionDetail : '') : 'None'}
+Calendar Appt: ${calendarCreated || 'No'} | Continuity Card: ${continuityCreated || 'No'} | Check-In Text: ${checkinScheduled || 'No'}
+Physician: ${physicianName ? physicianName + (physicianOffice ? ' — ' + physicianOffice : '') : 'None'}
+Red Flags: ${redFlags || 'None identified'}
+Problem Summary: ${problemSummary || 'Not available'}
+Treatment Plan: ${treatmentPlan || 'Not available'}
+Coaching Notes: ${coachingNotes || 'None'}
 
-Write TWO things:
+EMAIL 1 — TEAM (no clinical/coaching content):
+- Compact outcome header (colored left border: blue=converted, orange=pending, red=lost)
+- One-line next steps
+- Small actions table: Payment | Calendar | Continuity | Check-In | Objection (if any) | Physician (if any)
+- Red flags line (always show, even if none)
+- Plain HTML, inline styles, max-width 560px, system font stack, no images
 
-1. TEAM EMAIL — HTML with inline styles, Montserrat font, max 600px:
-   - Outcome banner (blue left border)
-   - NEXT STEPS section
-   - GHL ACTIONS TAKEN section: table with Payment Method, Calendar Appointment, Continuity Pipeline, Check-In Text, Objection if applicable, Physician if applicable
-   - RED FLAGS box (amber left border, always show)
+EMAIL 2 — JORDAN ONLY (same as team email plus):
+- WHAT WAS THE PROBLEM: 2-3 sentences max
+- WHAT IS THE PLAN: 2-3 sentences max  
+- COACHING NOTES: 3-5 tight bullet points, direct and specific
 
-2. JORDAN EMAIL — same as team email but add THREE extra sections:
-   - WHAT WAS THE PROBLEM section (green left border): problem summary including body region, injury history, long-term goals
-   - WHAT IS THE PLAN section (teal left border): treatment plan, recommendations, exercises discussed
-   - COACHING NOTES section at bottom (indigo left border): honest assessment of sales process, objection handling, presentation quality, and any specific improvement advice
+Both emails must be short enough to read in under 60 seconds. No lengthy prose anywhere.
 
-Return ONLY valid JSON:
-{"team_email_html": "complete HTML", "jordan_email_html": "complete HTML with clinical and coaching sections"}`;
+Return ONLY valid JSON — no markdown, no preamble:
+{"team_email_html": "...", "jordan_email_html": "..."}`;
 
   const response = await axios.post(
     'https://api.anthropic.com/v1/messages',
@@ -1207,7 +1205,12 @@ Return ONLY valid JSON:
   );
   const text = response.data.content[0].text;
   const cleaned = text.replace(/```json|```/g, '').trim();
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch (parseErr) {
+    console.error('generateEvalEmailContent JSON parse failed. Raw response (first 500 chars):', cleaned.substring(0, 500));
+    throw new Error('Email generation returned invalid JSON: ' + parseErr.message);
+  }
 }
 
 function getTimestamp() {
@@ -2614,37 +2617,16 @@ app.get('/post-eval', (req, res) => {
 
 
   // Form submit
-  document.getElementById('evalForm').addEventListener('submit', async function(e) {
+  document.getElementById('evalForm').addEventListener('submit', function(e) {
     e.preventDefault();
-    const btn = document.getElementById('submitBtn');
-    const status = document.getElementById('statusMsg');
-    btn.disabled = true;
-    btn.textContent = 'Processing...';
-    status.className = 'status loading';
-    status.style.display = 'block';
-    status.textContent = 'Submitting — this takes about 90 seconds. You can close this page; processing continues in the background.';
-
     const data = Object.fromEntries(new FormData(this));
-    try {
-      const res = await fetch('/post-eval', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data)
-      });
-      const result = await res.json();
-      if (result.success) {
-        status.className = 'status success';
-        status.textContent = 'Submitted! Redirecting...';
-        setTimeout(() => { window.location.href = '/thank-you'; }, 800);
-      } else {
-        throw new Error(result.error || 'Unknown error');
-      }
-    } catch (err) {
-      status.className = 'status error';
-      status.textContent = 'Something went wrong: ' + err.message + '. Please try again or contact Jordan.';
-    }
-    btn.disabled = false;
-    btn.textContent = 'Submit Evaluation';
+    // Fire and forget — redirect immediately, processing continues on server
+    fetch('/post-eval', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    }).catch(() => {}); // swallow errors — Slack handles failure notification
+    window.location.href = '/thank-you';
   });
 </script>
 </body>
