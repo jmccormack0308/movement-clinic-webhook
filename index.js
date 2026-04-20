@@ -1456,14 +1456,11 @@ app.get('/briefing', (req, res) => {
   function draftHtml(item) {
     const d = draftLinks[item.message_id];
     if (!d) return '';
-    // Render draft buttons — web Gmail links work on desktop.
-    // On mobile the button opens Gmail web; if user has Gmail app installed
-    // the browser will prompt to open in app on most devices.
     if (d.type === 'single') {
-      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank" rel="noopener">✏️ Draft</a>`;
+      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank" rel="noopener" onclick="tryGmailApp(event,'${esc(d.url)}')">✏️ Draft</a>`;
     }
-    return `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank" rel="noopener">✏️ ${esc(d.labelYes)}</a>
-            <a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank" rel="noopener">✏️ ${esc(d.labelNo)}</a>`;
+    return `<a class="btn btn-draft" href="${esc(d.urlYes || '#')}" target="_blank" rel="noopener" onclick="tryGmailApp(event,'${esc(d.urlYes || '')}')">✏️ ${esc(d.labelYes)}</a>
+            <a class="btn btn-draft-alt" href="${esc(d.urlNo || '#')}" target="_blank" rel="noopener" onclick="tryGmailApp(event,'${esc(d.urlNo || '')}')">✏️ ${esc(d.labelNo)}</a>`;
   }
 
   function markDoneBtn(notionId, title) {
@@ -1588,7 +1585,7 @@ app.get('/briefing', (req, res) => {
         ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
         ${item.recurring_flag ? `<p class="card-why">${esc(item.recurring_flag)}</p>` : ''}
         <div class="card-actions" style="margin-top:10px;flex-wrap:wrap;gap:6px;">
-          <a class="btn btn-draft" href="${esc(gmailDeepLink)}" target="_blank">📬 Open Email</a>
+          <a class="btn btn-draft" href="${esc(gmailDeepLink)}" target="_blank" onclick="tryGmailApp(event, '${esc(gmailDeepLink)}')">📬 Open Email</a>
           ${draftBtns}
           ${pushToAdminBtn(item)}
           ${pushToDirectorBtn(item)}
@@ -1776,6 +1773,10 @@ app.get('/briefing', (req, res) => {
     font-weight: 600;
     line-height: 1.4;
     word-break: break-word;
+    overflow-wrap: anywhere;
+    flex: 1;
+    min-width: 0;
+    display: block;
   }
   .card-title:hover { color: #0065a3; text-decoration: underline; }
 
@@ -1793,6 +1794,19 @@ app.get('/briefing', (req, res) => {
     flex-shrink: 0;
     flex-wrap: wrap;
     align-items: flex-start;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  /* On wider screens, actions sit inline with title */
+  @media (min-width: 520px) {
+    .card-actions {
+      width: auto;
+      margin-top: 0;
+    }
+    .card-header {
+      flex-wrap: nowrap;
+    }
   }
 
   /* ── Badges ── */
@@ -2004,6 +2018,23 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
 
   // Track done notion IDs in memory so all instances of the same task get greyed out
   const _doneIds = new Set();
+
+  // Try to open Gmail app on iOS via deep link, fall back to web URL
+  function tryGmailApp(e, webUrl) {
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    if (!isIOS) return; // Let default link behavior handle desktop
+    e.preventDefault();
+    // Extract message ID from Gmail web URL
+    const msgId = webUrl.split('#inbox/')[1] || webUrl.split('#drafts/')[1] || '';
+    if (msgId) {
+      // Try Gmail app deep link — if Gmail app is installed, this opens it directly
+      window.location.href = 'googlegmail://';
+      // Fallback to web after short delay if app didn't open
+      setTimeout(() => { window.open(webUrl, '_blank'); }, 500);
+    } else {
+      window.open(webUrl, '_blank');
+    }
+  }
 
   async function markDone(btn, notionId, title) {
     if (btn.classList.contains('done') || btn.classList.contains('loading')) return;
