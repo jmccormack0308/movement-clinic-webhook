@@ -1060,7 +1060,10 @@ app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on 
 
 const fs = require('fs');
 const path = require('path');
-const BRIEFING_FILE = path.join('/tmp', 'latest-briefing.json');
+// /data is a Railway persistent volume — survives restarts and redeploys.
+// Falls back to /tmp if the volume isn't mounted (e.g. local dev).
+const BRIEFING_DIR = require('fs').existsSync('/data') ? '/data' : '/tmp';
+const BRIEFING_FILE = path.join(BRIEFING_DIR, 'latest-briefing.json');
 
 // In-memory flag tracking whether a briefing run is currently in progress.
 // Simple boolean — no persistence needed, resets on server restart which is fine.
