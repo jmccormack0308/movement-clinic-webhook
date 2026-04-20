@@ -1408,14 +1408,14 @@ app.get('/briefing', (req, res) => {
             ${taskBadge(item)}
             <a class="card-title" href="${esc(item.url)}" target="_blank">${esc(item.title || 'Item')}</a>
           </div>
-          <div class="card-actions">
-            ${markDoneBtn(item.notion_id, item.title)}
-            ${pushToAdminBtn(item)}
-          </div>
         </div>
         ${item.reason ? `<p class="card-why">🕰 ${esc(item.reason)}</p>` : ''}
         ${item.suggested_notes ? `<p class="card-why">💬 ${esc(item.suggested_notes)}</p>` : ''}
         ${item.contact_name ? `<p class="card-why">👤 ${esc(item.contact_name)}</p>` : ''}
+        <div class="card-actions" style="margin-top:10px;">
+          ${markDoneBtn(item.notion_id, item.title)}
+          ${pushToAdminBtn(item)}
+        </div>
       </div>`).join('');
   }
 
