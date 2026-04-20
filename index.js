@@ -400,7 +400,7 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent"}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -519,6 +519,92 @@ async function createGHLTask(contactId, title, dueDate) {
     },
     { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
   );
+}
+
+// Quo user ID → PT name mapping
+// These IDs come from the Quo API (answeredBy / userId field on call objects)
+const QUO_USER_MAP = {
+  'USA0DVhDhZ': 'John Gan',
+  'USD3Kno24F': 'Shane Abbott',
+  'USHRRvAybv': 'Katy Vieira',
+  'USLnAV6kpl': 'Jordan McCormack',
+  'USnPowYhI2': 'TJ Aquino',
+  'USYIrAQecv': 'Chris Bostwick'
+};
+
+function capitalizeFullName(name) {
+  if (!name) return 'Unknown';
+  return name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
+}
+
+function extractTeamMember(callData) {
+  const data = callData.data || callData;
+  const userId = data.answeredBy || data.userId || data.initiatedBy || null;
+  if (userId && QUO_USER_MAP[userId]) return QUO_USER_MAP[userId];
+  // Log the userId so we can map it if not yet in QUO_USER_MAP
+  if (userId) console.log(`Unknown Quo userId — add to QUO_USER_MAP: ${userId}`);
+  return null;
+}
+
+function buildCallSlackBlocks(params) {
+  const {
+    contactName, contactPhone, callTime, teamMember, outcome,
+    pipeline, stageDisplay, redFlags, note, isNewOpportunity,
+    confidenceScore, confidenceReason, contactId
+  } = params;
+
+  const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'null' && redFlags !== 'None identified.';
+  const score = parseInt(confidenceScore) || 0;
+  const confidenceEmoji = score >= 90 ? ':large_green_circle:' : score >= 80 ? ':large_yellow_circle:' : ':red_circle:';
+  const confidenceText = `${confidenceEmoji} *${score}% Confident in Transcript Interpretation*`;
+  const pipelineDisplay = isNewOpportunity
+    ? 'New opportunity — added to ' + pipeline + ' pipeline'
+    : 'Pre-existed in ' + pipeline + ' pipeline';
+  const ghlUrl = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contactId}`;
+
+  const blocks = [
+    { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
+    { type: 'section', text: { type: 'mrkdwn', text: confidenceText + (confidenceReason ? '\n_' + confidenceReason + '_' : '') } },
+    { type: 'divider' },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: '*Name*\n' + capitalizeFullName(contactName) },
+      { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') },
+      { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
+      { type: 'mrkdwn', text: '*Team Member on Phone Call*\n' + (teamMember || 'Not identified') }
+    ]},
+    { type: 'divider' },
+    { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (note || outcome || 'See GHL for details') } },
+    { type: 'divider' },
+    { type: 'section', fields: [
+      { type: 'mrkdwn', text: '*Pipeline*\n' + pipelineDisplay },
+      { type: 'mrkdwn', text: '*Stage*\n' + (stageDisplay || 'Unknown') }
+    ]},
+    { type: 'divider' },
+    { type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } },
+    { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open in GHL' }, url: ghlUrl }] }
+  ];
+
+  return {
+    fallback: 'Claude AI Assistant — Call Summary for ' + capitalizeFullName(contactName),
+    blocks
+  };
+}
+
+async function sendSlackMessage(channel, blocksPayload) {
+  if (!SLACK_BOT_TOKEN) {
+    console.error('SLACK_BOT_TOKEN not set — skipping Slack notification');
+    return;
+  }
+  try {
+    await axios.post(
+      'https://slack.com/api/chat.postMessage',
+      { channel, text: blocksPayload.fallback, blocks: blocksPayload.blocks },
+      { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    console.log(`Slack message sent to ${channel}`);
+  } catch (err) {
+    console.error('Failed to send Slack message:', err.response?.data || err.message);
+  }
 }
 
 async function fireGHLSummaryWebhook(summaryData) {
@@ -680,10 +766,12 @@ app.post('/webhook', async (req, res) => {
     console.log(`Processing call ${callId}, transcript length: ${transcript.length}`);
 
     let contactPhone = null;
+    let teamMember = null;
     try {
       const callDetails = await getCallDetails(callId);
       contactPhone = extractContactPhone(callDetails);
-      console.log(`Contact phone: ${contactPhone}`);
+      teamMember = extractTeamMember(callDetails);
+      console.log(`Contact phone: ${contactPhone}, Team member: ${teamMember || 'unknown'}`);
     } catch (err) {
       console.error('Failed to fetch call details:', err.message);
     }
@@ -949,41 +1037,71 @@ app.post('/webhook', async (req, res) => {
       });
     }
 
-    // Slack pipeline manager — fires unconditionally, built from raw data
-    // Completely independent of email generation so it never gets swallowed
-    const slackOutcomeEmoji = {
-      'EVAL_SCHEDULED': '✅',
-      'NEEDS_FOLLOW_UP': '📞',
-      'ON_HOLD': '⏸️',
-      'POSSIBLE_DISQUALIFIER': '⚠️',
-      'VOICEMAIL': '📬',
-      'NO_CONTACT': '📵',
-      'WRONG_NUMBER': '❌'
-    }[claudeResult.outcome] || '📋';
-
-    // Determine Slack stage display — distinguish between auto-advance, blocked, action change, no change
+    // Build stage display string
     const stageSuppressed = claudeResult.action === 'NO_ACTION' &&
       (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT');
 
-    const slackStageInfo = stageChanged
-      ? `${STAGE_NAMES[previousStageId] || 'Unknown'} → *${STAGE_NAMES[finalStageId] || finalStageId}*`
+    const stageDisplay = stageChanged
+      ? `${STAGE_NAMES[previousStageId] || 'Unknown'} → ${STAGE_NAMES[finalStageId] || finalStageId}`
       : stageSuppressed
-        ? `*${STAGE_NAMES[previousStageId] || 'Current stage'}* (no change — additional touchpoint today)`
+        ? `${STAGE_NAMES[previousStageId] || 'Current stage'} (no change — additional touchpoint today)`
         : (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT')
-          ? `Auto-advanced → *${STAGE_NAMES[finalStageId] || finalStageId}*`
-          : `*${STAGE_NAMES[previousStageId] || 'Current stage'}* (no stage change)`;
+          ? `Auto-advanced → ${STAGE_NAMES[finalStageId] || finalStageId}`
+          : `${STAGE_NAMES[previousStageId] || 'Current stage'} (no stage change)`;
 
-    const slackMsg = `${slackOutcomeEmoji} *${finalContactName || 'Unknown'}* | ${claudeResult.outcome}
-` +
-      `📋 ${PIPELINE_NAMES[finalPipelineId] || 'Unknown Pipeline'} | ${slackStageInfo}
-` +
-      `${claudeResult.note ? claudeResult.note.slice(0, 200) : ''}` +
-      `${claudeResult.disqualifier_reason ? `
-⚠️ *Flag:* ${claudeResult.disqualifier_reason}` : ''}`;
+    // Hardcoded Block Kit format — never deviates from the confirmed template
+    const callBlocks = buildCallSlackBlocks({
+      contactName: finalContactName || 'Unknown',
+      contactPhone: contactPhone || 'Unknown',
+      callTime: getTimestamp(),
+      teamMember: teamMember || 'Not identified',
+      outcome: claudeResult.outcome || 'Unknown',
+      note: claudeResult.note || '',
+      pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
+      stageDisplay,
+      redFlags: claudeResult.disqualifier_reason || 'None',
+      isNewOpportunity,
+      confidenceScore: claudeResult.confidence_score || 0,
+      confidenceReason: claudeResult.confidence_reason || '',
+      contactId: contact.id
+    });
 
-    await sendSlackPipelineUpdate(slackMsg, finalContactName || 'Unknown', contact.id);
+    await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, callBlocks);
 
-    console.log(`Successfully processed call ${callId}: ${claudeResult.outcome}`);
+    // Low confidence handling — if < 80% and a GHL change was made, create a task for review
+    const confidenceScore = parseInt(claudeResult.confidence_score) || 0;
+    const ghlChangeWasMade = stageChanged || isNewOpportunity;
+    if (confidenceScore < 80 && ghlChangeWasMade) {
+      const nameParts = (finalContactName || 'Unknown').split(' ');
+      const taskTitle = `Low Confidence in Transcript — ${capitalizeFullName(finalContactName)}`;
+      const taskNotes = [
+        `Confidence Score: ${confidenceScore}%`,
+        `Reason: ${claudeResult.confidence_reason || 'Not provided'}`,
+        `Pipeline: ${PIPELINE_NAMES[finalPipelineId] || finalPipelineId}`,
+        `Stage: ${STAGE_NAMES[previousStageId] || 'Unknown'} → ${STAGE_NAMES[finalStageId] || 'Unknown'}`,
+        `Outcome Applied: ${claudeResult.outcome}`,
+        `New Opportunity Created: ${isNewOpportunity ? 'Yes' : 'No'}`,
+        `Stage Changed: ${stageChanged ? 'Yes' : 'No'}`,
+        `Action Required: Review GHL and verify the pipeline changes are correct.`
+      ].join('\n');
+      try {
+        const reviewDueDate = new Date();
+        reviewDueDate.setDate(reviewDueDate.getDate() + 1);
+        await createGHLTask(contact.id, taskTitle, reviewDueDate);
+        console.log(`Low confidence task created for ${finalContactName}`);
+      } catch (taskErr) {
+        console.error('Failed to create low confidence task:', taskErr.message);
+      }
+    } else if (confidenceScore < 80 && !ghlChangeWasMade) {
+      // Note only — add low confidence flag to the note
+      try {
+        await addNoteToContact(contact.id, `⚠️ Low Confidence in Transcript Interpretation (${confidenceScore}%) — no GHL changes were made. Manual review recommended.`);
+      } catch (noteErr) {
+        console.error('Failed to add low confidence note:', noteErr.message);
+      }
+    }
+
+    console.log(`Successfully processed call ${callId}: ${claudeResult.outcome} (confidence: ${confidenceScore}%)`);
     res.status(200).json({ success: true, outcome: claudeResult.outcome });
 
   } catch (error) {
