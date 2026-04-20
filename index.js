@@ -760,12 +760,13 @@ app.post('/webhook', async (req, res) => {
     let finalStageId = claudeResult.new_stage_id;
 
     // For voicemail and no-contact, advance the day/week progression automatically
-    // Guard: only advance once per calendar day per contact to prevent multi-call stage skipping
+    // Guard: only block day/week progression stages — action stages (NEEDS_FOLLOW_UP, ON_HOLD, etc.)
+    // always update regardless of how many times a contact is reached in one day
     if (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT') {
       if (hasAdvancedTodayAlready(contact.id)) {
-        console.log(`Stage advancement skipped for ${finalContactName} — already advanced today`);
-        finalStageId = previousStageId;
-        claudeResult.action = 'NO_ACTION';
+        console.log(`Stage advancement skipped for ${finalContactName} — already advanced today (additional touchpoint)`);
+        finalStageId = previousStageId; // stay on current stage
+        claudeResult.action = 'NO_ACTION'; // skip GHL stage update, but note + Slack still fire
       } else {
         const nextStage = getNextStageInProgression(finalPipelineId, previousStageId);
         if (nextStage) {
@@ -774,6 +775,12 @@ app.post('/webhook', async (req, res) => {
           console.log(`Auto-advancing to next stage: ${STAGE_NAMES[nextStage] || nextStage}`);
         }
       }
+    }
+    // Action outcomes always clear the same-day advancement guard so a meaningful
+    // interaction later in the day can still move the stage
+    const ACTION_OUTCOMES = ['EVAL_SCHEDULED', 'NEEDS_FOLLOW_UP', 'ON_HOLD', 'POSSIBLE_DISQUALIFIER', 'WRONG_NUMBER'];
+    if (ACTION_OUTCOMES.includes(claudeResult.outcome)) {
+      markAdvancedToday(contact.id); // reset so day/week won't fire after an action stage today
     }
 
     // Create opportunity if none exists — but first check if existing customer
@@ -954,11 +961,17 @@ app.post('/webhook', async (req, res) => {
       'WRONG_NUMBER': '❌'
     }[claudeResult.outcome] || '📋';
 
+    // Determine Slack stage display — distinguish between auto-advance, blocked, action change, no change
+    const stageSuppressed = claudeResult.action === 'NO_ACTION' &&
+      (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT');
+
     const slackStageInfo = stageChanged
       ? `${STAGE_NAMES[previousStageId] || 'Unknown'} → *${STAGE_NAMES[finalStageId] || finalStageId}*`
-      : (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT')
-        ? `Auto-advanced → *${STAGE_NAMES[finalStageId] || finalStageId}*`
-        : `No stage change`;
+      : stageSuppressed
+        ? `*${STAGE_NAMES[previousStageId] || 'Current stage'}* (no change — additional touchpoint today)`
+        : (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT')
+          ? `Auto-advanced → *${STAGE_NAMES[finalStageId] || finalStageId}*`
+          : `*${STAGE_NAMES[previousStageId] || 'Current stage'}* (no stage change)`;
 
     const slackMsg = `${slackOutcomeEmoji} *${finalContactName || 'Unknown'}* | ${claudeResult.outcome}
 ` +
