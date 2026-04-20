@@ -19,18 +19,45 @@ const PIPELINE_MANAGER_CHANNEL = 'C0ASJSMT76Y';
 // Quo sometimes fires the webhook multiple times for the same call.
 const processedCallIds = new Set();
 
-// In-memory guard: tracks contacts that already had their stage advanced today.
-// Resets on server restart/redeploy — sufficient for call volume.
-const stageAdvancedToday = new Map();
+// File-backed stage advancement guard — persists across Railway restarts/deploys.
+// Uses the same /data volume as the briefing file.
+const STAGE_GUARD_DIR = require('fs').existsSync('/data') ? '/data' : '/tmp';
+const STAGE_GUARD_FILE = require('path').join(STAGE_GUARD_DIR, 'stage-advancement-guard.json');
+
+function loadStageGuard() {
+  try {
+    if (require('fs').existsSync(STAGE_GUARD_FILE)) {
+      return JSON.parse(require('fs').readFileSync(STAGE_GUARD_FILE, 'utf8'));
+    }
+  } catch (e) { /* fall through */ }
+  return {};
+}
+
+function saveStageGuard(guard) {
+  try {
+    // Prune entries older than today to keep file small
+    const today = new Date().toISOString().slice(0, 10);
+    const pruned = {};
+    for (const [id, date] of Object.entries(guard)) {
+      if (date === today) pruned[id] = date;
+    }
+    require('fs').writeFileSync(STAGE_GUARD_FILE, JSON.stringify(pruned));
+  } catch (e) {
+    console.error('Failed to save stage guard:', e.message);
+  }
+}
 
 function hasAdvancedTodayAlready(contactId) {
   const today = new Date().toISOString().slice(0, 10);
-  return stageAdvancedToday.get(contactId) === today;
+  const guard = loadStageGuard();
+  return guard[contactId] === today;
 }
 
 function markAdvancedToday(contactId) {
   const today = new Date().toISOString().slice(0, 10);
-  stageAdvancedToday.set(contactId, today);
+  const guard = loadStageGuard();
+  guard[contactId] = today;
+  saveStageGuard(guard);
 }
 
 async function sendSlackPipelineUpdate(slackMessage, contactName, contactId) {
