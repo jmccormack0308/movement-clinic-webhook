@@ -7,6 +7,7 @@
     "start": "node --max-http-header-size=524288 index.js"
   },
   "dependencies": {
+    "@notionhq/client": "^5.19.0",
     "axios": "^1.6.0",
     "express": "^4.18.2",
     "googleapis": "^171.4.0",
