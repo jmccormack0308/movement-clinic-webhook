@@ -1061,6 +1061,11 @@ app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on 
 const fs = require('fs');
 const path = require('path');
 const BRIEFING_FILE = path.join('/tmp', 'latest-briefing.json');
+
+// In-memory flag tracking whether a briefing run is currently in progress.
+// Simple boolean — no persistence needed, resets on server restart which is fine.
+let briefingIsProcessing = false;
+let briefingProcessingStartedAt = null;
 const BRIEFING_PIN = process.env.BRIEFING_PIN || '2365';
 const NOTION_TOKEN_BRIEFING = process.env.NOTION_TOKEN;
 
@@ -1070,6 +1075,9 @@ app.post('/save-briefing', (req, res) => {
   if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
   try {
     fs.writeFileSync(BRIEFING_FILE, JSON.stringify({ ...req.body, savedAt: new Date().toISOString() }));
+    // Clear processing flag — briefing is now saved and ready
+    briefingIsProcessing = false;
+    briefingProcessingStartedAt = null;
     console.log('💾 Briefing saved');
     res.json({ ok: true });
   } catch (err) {
@@ -1268,12 +1276,15 @@ app.get('/run-briefing', async (req, res) => {
     return res.status(500).send('DAILY_BRIEFING_URL env var not set');
   }
 
+  // Set processing flag so the briefing page shows the right status
+  briefingIsProcessing = true;
+  briefingProcessingStartedAt = new Date().toISOString();
+
   try {
     // Fire the trigger on the Daily-Briefing service — don't await full completion
     axios.get(`${DAILY_BRIEFING_URL}/trigger?pin=${BRIEFING_PIN}`).catch(() => null);
   } catch {}
 
-  // Redirect straight to the briefing page — it'll be ready in ~60s
   res.send(`
     <html>
     <head>
@@ -1283,19 +1294,70 @@ app.get('/run-briefing', async (req, res) => {
         body { font-family: 'Montserrat', Arial, sans-serif; background: #F7F8FA; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
         .card { background: #232323; color: #F7F8FA; padding: 40px 48px; border-radius: 14px; border-bottom: 4px solid #FFD70A; text-align: center; max-width: 420px; }
         h1 { font-size: 20px; font-weight: 700; margin: 0 0 10px; }
-        p { font-size: 13px; color: #aaa; margin: 0 0 24px; line-height: 1.6; }
+        p { font-size: 13px; color: #aaa; margin: 0 0 8px; line-height: 1.6; }
+        .countdown { font-size: 12px; color: #FFD70A; margin: 0 0 24px; font-weight: 700; }
         a { display: inline-block; background: #FFD70A; color: #232323; text-decoration: none; padding: 10px 24px; border-radius: 8px; font-size: 13px; font-weight: 700; }
       </style>
+      <script>
+        let secs = 65;
+        const briefingUrl = '/briefing?pin=${BRIEFING_PIN}';
+        setTimeout(() => { window.location.href = briefingUrl; }, secs * 1000);
+        setInterval(() => {
+          secs--;
+          const el = document.getElementById('countdown');
+          if (el) el.textContent = 'Auto-opening briefing in ' + secs + 's…';
+          if (secs <= 0) window.location.href = briefingUrl;
+        }, 1000);
+      </script>
     </head>
     <body>
       <div class="card">
         <h1>🚀 Briefing Running</h1>
-        <p>The daily briefing has been triggered and is running in the background. Check back in about 60 seconds.</p>
-        <a href="/briefing?pin=${BRIEFING_PIN}">Open Briefing Page →</a>
+        <p>Your briefing is being generated. Takes about 30–60 seconds.</p>
+        <p class="countdown" id="countdown">Auto-opening briefing in 65s…</p>
+        <a href="/briefing?pin=${BRIEFING_PIN}">Open Now →</a>
       </div>
     </body>
     </html>
   `);
+});
+
+// ── PWA manifest ──
+app.get('/manifest.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/manifest+json');
+  res.json({
+    name: 'Movement Clinic Briefing',
+    short_name: 'Briefing',
+    description: 'Daily briefing for Movement Clinic PT',
+    start_url: '/briefing?pin=${BRIEFING_PIN}',
+    display: 'standalone',
+    background_color: '#F7F8FA',
+    theme_color: '#232323',
+    orientation: 'portrait',
+    icons: [
+      { src: '/icon-192.png', sizes: '192x192', type: 'image/png' },
+      { src: '/icon-512.png', sizes: '512x512', type: 'image/png' }
+    ]
+  });
+});
+
+// ── PWA icons — simple SVG-based PNG rendered as base64 ──
+// Dark square with yellow MC initials — matches brand kit
+const PWA_ICON_SVG = (size) => `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+  <rect width="${size}" height="${size}" rx="${size * 0.18}" fill="#232323"/>
+  <rect x="0" y="${size * 0.88}" width="${size}" height="${size * 0.12}" rx="0" fill="#FFD70A"/>
+  <text x="50%" y="54%" font-family="Arial,sans-serif" font-weight="700" font-size="${size * 0.38}" fill="#F7F8FA" text-anchor="middle" dominant-baseline="middle">MC</text>
+</svg>`;
+
+app.get('/icon-192.png', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.setHeader('Content-Disposition', 'inline; filename="icon.svg"');
+  res.send(PWA_ICON_SVG(192));
+});
+
+app.get('/icon-512.png', (req, res) => {
+  res.setHeader('Content-Type', 'image/svg+xml');
+  res.send(PWA_ICON_SVG(512));
 });
 
 // ── Briefing landing page ──
@@ -1391,11 +1453,14 @@ app.get('/briefing', (req, res) => {
   function draftHtml(item) {
     const d = draftLinks[item.message_id];
     if (!d) return '';
+    // Render draft buttons — web Gmail links work on desktop.
+    // On mobile the button opens Gmail web; if user has Gmail app installed
+    // the browser will prompt to open in app on most devices.
     if (d.type === 'single') {
-      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank">✏️ Open Draft</a>`;
+      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank" rel="noopener">✏️ Draft</a>`;
     }
-    return `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank">✏️ ${esc(d.labelYes)}</a>
-            <a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank">✏️ ${esc(d.labelNo)}</a>`;
+    return `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank" rel="noopener">✏️ ${esc(d.labelYes)}</a>
+            <a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank" rel="noopener">✏️ ${esc(d.labelNo)}</a>`;
   }
 
   function markDoneBtn(notionId, title) {
@@ -1437,6 +1502,8 @@ app.get('/briefing', (req, res) => {
           <div class="card-actions">
             ${markDoneBtn(item.notion_id, item.title)}
             ${draftHtml(item)}
+            ${pushToAdminBtn(item)}
+            ${pushToDirectorBtn(item)}
           </div>
         </div>
         ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
@@ -1454,6 +1521,8 @@ app.get('/briefing', (req, res) => {
           </div>
           <div class="card-actions">
             ${markDoneBtn(item.notion_id, item.title)}
+            ${pushToAdminBtn(item)}
+            ${pushToDirectorBtn(item)}
           </div>
         </div>
         ${item.due_date ? `<p class="card-why">📅 Due: ${esc(item.due_date)}</p>` : ''}
@@ -1488,6 +1557,43 @@ app.get('/briefing', (req, res) => {
       </div>`).join('');
   }
 
+  function renderEmailItems(items, emptyMsg) {
+    if (!items || items.length === 0) return `<p class="empty">${emptyMsg}</p>`;
+    return items.map(item => {
+      const d = draftLinks[item.message_id];
+      // Build deep link — on mobile, mailto: opens the mail app; gmail:// scheme works on iOS Gmail app
+      // For web, use the direct gmail URL
+      const gmailDeepLink = item.url || '#';
+      let draftBtns = '';
+      if (d && d.type === 'single') {
+        draftBtns = `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank">✏️ Open Draft</a>`;
+      } else if (d && d.type === 'ambiguous') {
+        draftBtns = `
+          ${d.urlYes ? `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank">✏️ ${esc(d.labelYes)}</a>` : ''}
+          ${d.urlNo ? `<a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank">✏️ ${esc(d.labelNo)}</a>` : ''}`;
+      }
+      return `
+      <div class="card" id="card-${esc(item.message_id || Math.random())}">
+        <div class="card-header">
+          <div class="card-left">
+            <span class="badge badge-email">Email</span>
+            <span class="card-title">${esc(item.subject || item.title || '(no subject)')}</span>
+          </div>
+        </div>
+        ${item.from ? `<p class="card-why">From: ${esc(item.from)}</p>` : ''}
+        ${item.summary ? `<p class="card-why">${esc(item.summary)}</p>` : ''}
+        ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
+        ${item.recurring_flag ? `<p class="card-why">${esc(item.recurring_flag)}</p>` : ''}
+        <div class="card-actions" style="margin-top:10px;flex-wrap:wrap;gap:6px;">
+          <a class="btn btn-draft" href="${esc(gmailDeepLink)}" target="_blank">📬 Open Email</a>
+          ${draftBtns}
+          ${pushToAdminBtn(item)}
+          ${pushToDirectorBtn(item)}
+        </div>
+      </div>`;
+    }).join('');
+  }
+
   function renderCalendarEvents(items, emptyMsg) {
     if (!items || items.length === 0) return `<p class="empty">${emptyMsg}</p>`;
     return items.map(item => `
@@ -1520,8 +1626,14 @@ app.get('/briefing', (req, res) => {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Daily Briefing — ${esc(dateStr)}</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Briefing">
+<meta name="theme-color" content="#232323">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1533,7 +1645,8 @@ app.get('/briefing', (req, res) => {
     background: #F7F8FA;
     color: #232323;
     min-height: 100vh;
-    padding: 0 0 60px;
+    padding: 0 0 env(safe-area-inset-bottom, 60px);
+    padding-bottom: max(60px, env(safe-area-inset-bottom));
   }
 
   /* ── Top bar ── */
@@ -1827,7 +1940,13 @@ app.get('/briefing', (req, res) => {
   </div>
 </div>
 
-${!data ? `<div class="no-data"><h2>No briefing available</h2><p>The daily briefing hasn't run yet, or the server was restarted.</p></div>` : `
+${briefingIsProcessing ? `
+<div class="no-data">
+  <h2 style="color:#0065a3;">⏳ Processing your briefing…</h2>
+  <p>Your daily briefing is being generated right now. This takes about 30–60 seconds.</p>
+  <p style="margin-top:8px;font-size:11px;color:#9ca3af;">Started at ${esc(briefingProcessingStartedAt || '')} · This page will update when ready.</p>
+  <button onclick="window.location.reload()" style="margin-top:20px;background:#232323;color:#F7F8FA;border:none;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:'Montserrat',sans-serif;">Refresh Page</button>
+</div>` : !data ? `<div class="no-data"><h2>No briefing available</h2><p>The daily briefing hasn't run yet, or the server was restarted.</p></div>` : `
 
 ${overallSummary ? `<div class="summary-banner">${esc(overallSummary)}</div>` : ''}
 
@@ -1838,7 +1957,7 @@ ${section('overdue', '⚠️ Overdue', overdueItems.length,
     renderSimpleItems(overdueItems, 'Nothing overdue.'), true)}
 
 ${section('emails', '📧 Emails Needing Response', emailsNeedReply.length,
-    renderItems(emailsNeedReply, 'No emails flagged for response.'), true)}
+    renderEmailItems(emailsNeedReply, 'No emails flagged for response.'), true)}
 
 ${section('delegate', '👤 Delegate to Admin', delegateItems.length,
     renderDelegateItems(delegateItems, 'Nothing to delegate.'), false)}
@@ -1880,6 +1999,9 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
     document.querySelectorAll('details.section').forEach(d => d.open = open);
   }
 
+  // Track done notion IDs in memory so all instances of the same task get greyed out
+  const _doneIds = new Set();
+
   async function markDone(btn, notionId, title) {
     if (btn.classList.contains('done') || btn.classList.contains('loading')) return;
     btn.classList.add('loading');
@@ -1892,15 +2014,32 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
         body: JSON.stringify({ notionId }),
       });
       if (!res.ok) throw new Error('Server error');
-      const card = btn.closest('.card');
-      card.style.transition = 'opacity 0.4s, transform 0.4s';
-      card.style.opacity = '0';
-      card.style.transform = 'translateX(12px)';
-      setTimeout(() => card.remove(), 420);
+
+      // Mark ALL cards with this notionId across every section
+      _doneIds.add(notionId);
+      document.querySelectorAll('.card').forEach(card => {
+        if (card.id === 'card-' + notionId) {
+          applyDoneStyle(card);
+        }
+      });
     } catch (err) {
       btn.classList.remove('loading');
       btn.textContent = '✓ Mark Done';
       alert('Failed to mark done: ' + err.message);
+    }
+  }
+
+  function applyDoneStyle(card) {
+    // Grey out the card and strike through the title — don't remove it
+    card.style.opacity = '0.45';
+    card.style.pointerEvents = 'none';
+    const title = card.querySelector('.card-title');
+    if (title) title.style.textDecoration = 'line-through';
+    const btn = card.querySelector('.btn-done');
+    if (btn) {
+      btn.textContent = '✓ Done';
+      btn.classList.remove('loading');
+      btn.classList.add('done');
     }
   }
 
