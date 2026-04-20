@@ -1055,6 +1055,513 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on port ${PORT}`); });
 
 // ============================================================
+// DAILY BRIEFING
+// ============================================================
+
+const fs = require('fs');
+const path = require('path');
+const BRIEFING_FILE = path.join('/tmp', 'latest-briefing.json');
+const BRIEFING_PIN = process.env.BRIEFING_PIN || '2365';
+const NOTION_TOKEN_BRIEFING = process.env.NOTION_TOKEN;
+
+// ── Save briefing payload posted by the daily-briefing service ──
+app.post('/save-briefing', (req, res) => {
+  const pin = req.headers['x-briefing-pin'];
+  if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    fs.writeFileSync(BRIEFING_FILE, JSON.stringify({ ...req.body, savedAt: new Date().toISOString() }));
+    console.log('💾 Briefing saved');
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Save briefing error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Mark a Notion task as Done ──
+app.post('/mark-done', async (req, res) => {
+  const pin = req.headers['x-briefing-pin'] || req.body?.pin;
+  if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
+  const { notionId } = req.body;
+  if (!notionId) return res.status(400).json({ error: 'Missing notionId' });
+  try {
+    await axios.patch(
+      `https://api.notion.com/v1/pages/${notionId}`,
+      { properties: { Done: { checkbox: true } } },
+      {
+        headers: {
+          'Authorization': `Bearer ${NOTION_TOKEN_BRIEFING}`,
+          'Notion-Version': '2022-06-28',
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Mark done error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Briefing landing page ──
+app.get('/briefing', (req, res) => {
+  const { pin } = req.query;
+  if (pin !== BRIEFING_PIN) {
+    return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Briefing</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  .lock { text-align: center; padding: 40px 24px; }
+  .lock h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; color: #f1f5f9; }
+  .lock p { font-size: 14px; color: #64748b; margin-bottom: 28px; }
+  .lock input { width: 180px; padding: 12px 16px; border-radius: 10px; border: 1px solid #334155; background: #1e2536; color: #f1f5f9; font-size: 18px; text-align: center; letter-spacing: 6px; outline: none; }
+  .lock input:focus { border-color: #3b82f6; }
+  .lock button { display: block; margin: 16px auto 0; padding: 11px 32px; background: #3b82f6; color: #fff; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  .lock button:hover { background: #2563eb; }
+  .err { color: #ef4444; font-size: 13px; margin-top: 12px; min-height: 18px; }
+</style>
+</head>
+<body>
+<div class="lock">
+  <h1>Daily Briefing</h1>
+  <p>Movement Clinic</p>
+  <input type="password" id="pin" placeholder="••••" maxlength="10" autofocus>
+  <button onclick="go()">Open</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+  document.getElementById('pin').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  function go() {
+    const v = document.getElementById('pin').value.trim();
+    if (!v) return;
+    window.location.href = '/briefing?pin=' + encodeURIComponent(v);
+  }
+</script>
+</body>
+</html>`);
+  }
+
+  // Load briefing data
+  let data = null;
+  try {
+    if (fs.existsSync(BRIEFING_FILE)) {
+      data = JSON.parse(fs.readFileSync(BRIEFING_FILE, 'utf8'));
+    }
+  } catch (e) { /* fall through to no-data state */ }
+
+  const a = data?.analysis || {};
+  const draftLinks = data?.draftLinks || {};
+  const savedAt = data?.savedAt ? new Date(data.savedAt) : null;
+  const dateStr = savedAt
+    ? savedAt.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+    : 'No briefing loaded';
+  const timeStr = savedAt
+    ? savedAt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZoneName: 'short' })
+    : '';
+
+  const priorityActions   = a.priority_actions_today || [];
+  const emailsNeedReply   = a.emails_needing_response || [];
+  const upcomingTasks     = a.upcoming_deadlines || [];
+  const overdueItems      = a.overdue_items || [];
+  const delegateItems     = a.delegate_to_admin || [];
+  const staleItems        = a.stale_tasks || a.stale_items || [];
+  const overallSummary    = a.overall_summary || '';
+
+  // ── HTML helpers ──────────────────────────────────────────────────────────
+
+  function esc(s) {
+    return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function taskBadge(item) {
+    if (item.type === 'email') return '<span class="badge badge-email">Email</span>';
+    return '<span class="badge badge-task">Task</span>';
+  }
+
+  function urgencyClass(item) {
+    const why = (item.why || '').toLowerCase();
+    if (why.includes('overdue') || why.includes('today')) return 'urgency-high';
+    if (why.includes('tomorrow') || why.includes('this week')) return 'urgency-med';
+    return 'urgency-low';
+  }
+
+  function draftHtml(item) {
+    const d = draftLinks[item.message_id];
+    if (!d) return '';
+    if (d.type === 'single') {
+      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank">✏️ Open Draft</a>`;
+    }
+    return `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank">✏️ ${esc(d.labelYes)}</a>
+            <a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank">✏️ ${esc(d.labelNo)}</a>`;
+  }
+
+  function markDoneBtn(notionId, title) {
+    if (!notionId) return '';
+    return `<button class="btn btn-done" onclick="markDone(this,'${esc(notionId)}','${esc(title).replace(/'/g,"\\'")}')">✓ Mark Done</button>`;
+  }
+
+  function renderItems(items, emptyMsg) {
+    if (!items || items.length === 0) {
+      return `<p class="empty">${emptyMsg}</p>`;
+    }
+    return items.map(item => `
+      <div class="card ${item.notion_id ? urgencyClass(item) : ''}" id="card-${esc(item.notion_id || item.message_id || Math.random())}">
+        <div class="card-header">
+          <div class="card-left">
+            ${taskBadge(item)}
+            <a class="card-title" href="${esc(item.url)}" target="_blank">${esc(item.title)}</a>
+          </div>
+          <div class="card-actions">
+            ${markDoneBtn(item.notion_id, item.title)}
+            ${draftHtml(item)}
+          </div>
+        </div>
+        ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
+      </div>`).join('');
+  }
+
+  function renderSimpleItems(items, emptyMsg) {
+    if (!items || items.length === 0) return `<p class="empty">${emptyMsg}</p>`;
+    return items.map(item => `
+      <div class="card" id="card-${esc(item.notion_id || item.message_id || Math.random())}">
+        <div class="card-header">
+          <div class="card-left">
+            ${taskBadge(item)}
+            <a class="card-title" href="${esc(item.url)}" target="_blank">${esc(item.title || item.deadline || 'Item')}</a>
+          </div>
+          <div class="card-actions">
+            ${markDoneBtn(item.notion_id, item.title)}
+          </div>
+        </div>
+        ${item.due_date ? `<p class="card-why">📅 Due: ${esc(item.due_date)}</p>` : ''}
+        ${item.when ? `<p class="card-why">📅 ${esc(item.when)}</p>` : ''}
+        ${item.action ? `<p class="card-why">→ ${esc(item.action)}</p>` : ''}
+        ${item.suggested_action ? `<p class="card-why">→ ${esc(item.suggested_action)}</p>` : ''}
+        ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
+        ${item.reason ? `<p class="card-why">🕰 ${esc(item.reason)}</p>` : ''}
+        ${item.recommendation ? `<p class="card-why">💡 ${esc(item.recommendation)}</p>` : ''}
+        ${item.recurring_flag ? `<p class="card-why">${esc(item.recurring_flag)}</p>` : ''}
+      </div>`).join('');
+  }
+
+  function section(id, title, count, content, startOpen = true) {
+    const openAttr = startOpen ? 'open' : '';
+    const countBadge = count > 0 ? `<span class="section-count">${count}</span>` : '';
+    return `
+    <details class="section" ${openAttr} id="section-${id}">
+      <summary class="section-summary">
+        <span class="section-title">${title}${countBadge}</span>
+        <span class="chevron">▾</span>
+      </summary>
+      <div class="section-body">${content}</div>
+    </details>`;
+  }
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Daily Briefing — ${esc(dateStr)}</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    padding: 0 0 60px;
+  }
+
+  /* ── Top bar ── */
+  .topbar {
+    background: #161b27;
+    border-bottom: 1px solid #1e2a3a;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .topbar-left h1 { font-size: 17px; font-weight: 700; color: #f1f5f9; }
+  .topbar-left p  { font-size: 12px; color: #475569; margin-top: 2px; }
+  .topbar-right   { display: flex; gap: 10px; align-items: center; }
+  .expand-all, .collapse-all {
+    font-size: 12px; color: #64748b; background: none; border: 1px solid #334155;
+    padding: 5px 12px; border-radius: 6px; cursor: pointer;
+  }
+  .expand-all:hover, .collapse-all:hover { color: #94a3b8; border-color: #475569; }
+
+  /* ── Summary banner ── */
+  .summary-banner {
+    background: #1a2234;
+    border-left: 4px solid #3b82f6;
+    margin: 20px 20px 0;
+    padding: 14px 18px;
+    border-radius: 0 8px 8px 0;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #94a3b8;
+  }
+
+  /* ── Sections ── */
+  .section {
+    margin: 16px 20px 0;
+    background: #161b27;
+    border: 1px solid #1e2a3a;
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .section-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 18px;
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+  }
+  .section-summary::-webkit-details-marker { display: none; }
+  .section-summary:hover { background: #1a2234; }
+
+  .section-title {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .section-count {
+    background: #1e3a5f;
+    color: #60a5fa;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 20px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+
+  .chevron {
+    color: #475569;
+    font-size: 16px;
+    transition: transform 0.2s;
+  }
+  details[open] .chevron { transform: rotate(180deg); }
+
+  .section-body { padding: 4px 14px 14px; }
+
+  /* ── Cards ── */
+  .card {
+    background: #1a2234;
+    border: 1px solid #243044;
+    border-radius: 10px;
+    padding: 13px 15px;
+    margin-top: 10px;
+    border-left-width: 3px;
+  }
+  .urgency-high { border-left-color: #ef4444; }
+  .urgency-med  { border-left-color: #f59e0b; }
+  .urgency-low  { border-left-color: #243044; }
+
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .card-left {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    flex: 1;
+    min-width: 0;
+  }
+  .card-title {
+    color: #e2e8f0;
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+  .card-title:hover { color: #60a5fa; text-decoration: underline; }
+
+  .card-why {
+    font-size: 12px;
+    color: #64748b;
+    margin-top: 7px;
+    line-height: 1.5;
+  }
+
+  .card-actions {
+    display: flex;
+    gap: 7px;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  /* ── Badges ── */
+  .badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 4px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-top: 2px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .badge-task  { background: #1e3a5f; color: #60a5fa; }
+  .badge-email { background: #2d1f3f; color: #a78bfa; }
+
+  /* ── Buttons ── */
+  .btn {
+    font-size: 12px;
+    font-weight: 600;
+    padding: 5px 12px;
+    border-radius: 7px;
+    border: none;
+    cursor: pointer;
+    white-space: nowrap;
+    text-decoration: none;
+    display: inline-block;
+    line-height: 1.4;
+  }
+  .btn-done {
+    background: #14532d;
+    color: #86efac;
+    border: 1px solid #166534;
+  }
+  .btn-done:hover { background: #166534; }
+  .btn-done.done  { background: #0f2e1a; color: #4ade80; cursor: default; opacity: 0.7; }
+  .btn-done.loading { opacity: 0.5; cursor: wait; }
+
+  .btn-draft {
+    background: #1e1b4b;
+    color: #a5b4fc;
+    border: 1px solid #312e81;
+  }
+  .btn-draft:hover { background: #312e81; }
+
+  .btn-draft-alt {
+    background: #1f1f1f;
+    color: #94a3b8;
+    border: 1px solid #334155;
+  }
+  .btn-draft-alt:hover { background: #334155; }
+
+  /* ── Empty state ── */
+  .empty {
+    font-size: 13px;
+    color: #334155;
+    padding: 12px 4px;
+    font-style: italic;
+  }
+
+  /* ── No data state ── */
+  .no-data {
+    text-align: center;
+    padding: 80px 24px;
+    color: #475569;
+  }
+  .no-data h2 { font-size: 18px; margin-bottom: 8px; }
+  .no-data p  { font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <h1>Daily Briefing</h1>
+    <p>${esc(dateStr)}${timeStr ? ' · Generated ' + esc(timeStr) : ''}</p>
+  </div>
+  <div class="topbar-right">
+    <button class="expand-all"   onclick="toggleAll(true)">Expand all</button>
+    <button class="collapse-all" onclick="toggleAll(false)">Collapse all</button>
+  </div>
+</div>
+
+${!data ? `<div class="no-data"><h2>No briefing available</h2><p>The daily briefing hasn't run yet, or the server was restarted.</p></div>` : `
+
+${overallSummary ? `<div class="summary-banner">${esc(overallSummary)}</div>` : ''}
+
+${section('priority', '🔴 Priority Actions Today', priorityActions.length,
+    renderItems(priorityActions, 'No priority actions — you\'re clear.'), true)}
+
+${section('overdue', '⚠️ Overdue', overdueItems.length,
+    renderSimpleItems(overdueItems, 'Nothing overdue.'), true)}
+
+${section('emails', '📧 Emails Needing Response', emailsNeedReply.length,
+    renderItems(emailsNeedReply, 'No emails flagged for response.'), true)}
+
+${section('delegate', '👤 Delegate to Admin', delegateItems.length,
+    renderSimpleItems(delegateItems, 'Nothing to delegate.'), false)}
+
+${section('upcoming', '📅 Upcoming Deadlines', upcomingTasks.length,
+    renderSimpleItems(upcomingTasks, 'No upcoming deadlines in the next 7 days.'), false)}
+
+${section('stale', '🕰 Stale / No Due Date', staleItems.length,
+    renderSimpleItems(staleItems, 'Nothing stale.'), false)}
+
+`}
+
+<script>
+  const PIN = '${esc(BRIEFING_PIN)}';
+
+  function toggleAll(open) {
+    document.querySelectorAll('details.section').forEach(d => d.open = open);
+  }
+
+  async function markDone(btn, notionId, title) {
+    if (btn.classList.contains('done') || btn.classList.contains('loading')) return;
+    btn.classList.add('loading');
+    btn.textContent = '…';
+
+    try {
+      const res = await fetch('/mark-done', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-briefing-pin': PIN },
+        body: JSON.stringify({ notionId }),
+      });
+      if (!res.ok) throw new Error('Server error');
+
+      // Fade and remove the card
+      const card = btn.closest('.card');
+      card.style.transition = 'opacity 0.4s, transform 0.4s';
+      card.style.opacity = '0';
+      card.style.transform = 'translateX(12px)';
+      setTimeout(() => card.remove(), 420);
+    } catch (err) {
+      btn.classList.remove('loading');
+      btn.textContent = '✓ Mark Done';
+      alert('Failed to mark done: ' + err.message);
+    }
+  }
+</script>
+</body>
+</html>`;
+
+  res.send(html);
+});
+
+// ============================================================
 // POST-EVAL FORM
 // ============================================================
 
