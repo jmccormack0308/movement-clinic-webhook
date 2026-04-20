@@ -1104,6 +1104,97 @@ app.post('/mark-done', async (req, res) => {
 });
 
 // ── Push task to admin ──
+// ── Shared helper: create a GHL task assigned to a specific user ──────────────
+async function createPushTask(title, notes, notionUrl, contactName, contactPhone, assigneeGhlId) {
+  const results = { ghlTask: null, errors: [] };
+  const dueDate = new Date();
+  dueDate.setDate(dueDate.getDate() + 2);
+
+  if (contactPhone) {
+    try {
+      const cleanPhone = contactPhone.replace(/\D/g, '');
+      const contactRes = await axios.get(
+        `https://services.leadconnectorhq.com/contacts/?locationId=${GHL_LOCATION_ID}&query=${cleanPhone}`,
+        { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28' } }
+      );
+      const contact = contactRes.data.contacts?.[0];
+      if (contact) {
+        await axios.post(
+          `https://services.leadconnectorhq.com/contacts/${contact.id}/tasks`,
+          { title, body: notes || '', dueDate: dueDate.toISOString(), completed: false, assignedTo: assigneeGhlId },
+          { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
+        );
+        results.ghlTask = `Linked to contact: ${contact.firstName || contactName || contactPhone}`;
+      } else {
+        results.errors.push('Contact not found in GHL — task not created');
+        results.ghlTask = 'No GHL contact match found';
+      }
+    } catch (err) {
+      results.errors.push('GHL task: ' + err.message);
+      results.ghlTask = 'GHL task failed';
+    }
+  } else {
+    // No phone — skip GHL task, email will carry the task
+    results.ghlTask = 'No contact phone — task sent via email only';
+  }
+
+  return results;
+}
+
+// ── Shared helper: send task email via Gmail ───────────────────────────────────
+async function sendTaskEmail(toEmail, roleLabel, accentColor, title, notes, notionUrl, contactName) {
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+  const safeTitle = title.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const safeNotes = notes ? notes.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>') : '';
+  const safeContact = contactName ? contactName.replace(/</g, '&lt;') : '';
+
+  const emailHtml = `
+<div style="font-family:'Montserrat','Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;background:#F7F8FA;">
+  <div style="background:#232323;padding:20px 24px;border-bottom:3px solid ${accentColor};">
+    <p style="color:#F7F8FA;font-size:13px;font-weight:700;margin:0;letter-spacing:0.5px;">MOVEMENT CLINIC · ${roleLabel} TASK</p>
+  </div>
+  <div style="padding:24px;">
+    <h2 style="font-size:18px;font-weight:700;color:#232323;margin:0 0 16px;">${safeTitle}</h2>
+    ${safeContact ? `<p style="font-size:13px;color:#6b7280;margin:0 0 8px;"><strong>Related to:</strong> ${safeContact}</p>` : ''}
+    ${safeNotes ? `
+    <div style="background:#fff;border:1px solid #e5e7eb;border-left:4px solid ${accentColor};border-radius:0 8px 8px 0;padding:14px 16px;margin:16px 0;">
+      <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6b7280;margin:0 0 8px;">Notes from Jordan</p>
+      <p style="font-size:14px;color:#232323;line-height:1.6;margin:0;">${safeNotes}</p>
+    </div>` : ''}
+    ${notionUrl ? `<p style="margin:16px 0 0;"><a href="${notionUrl}" style="display:inline-block;background:#232323;color:#F7F8FA;padding:9px 18px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.5px;">Open in Notion →</a></p>` : ''}
+    <p style="font-size:11px;color:#9ca3af;margin:24px 0 0;border-top:1px solid #e5e7eb;padding-top:16px;">Assigned ${today} · Movement Clinic Daily Briefing</p>
+  </div>
+</div>`;
+
+  const { google } = require('googleapis');
+  const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+  if (!SERVICE_ACCOUNT_JSON.client_email) throw new Error('No service account configured');
+
+  const auth = new google.auth.JWT({
+    email: SERVICE_ACCOUNT_JSON.client_email,
+    key: SERVICE_ACCOUNT_JSON.private_key,
+    scopes: ['https://www.googleapis.com/auth/gmail.send'],
+    subject: process.env.GMAIL_USER,
+  });
+  await auth.authorize();
+  const gmail = google.gmail({ version: 'v1', auth });
+  const subject = `Task Assigned: ${title}`;
+  const messageParts = [
+    `From: ${process.env.GMAIL_USER}`,
+    `To: ${toEmail}`,
+    `Subject: ${subject}`,
+    'Content-Type: text/html; charset=utf-8',
+    'MIME-Version: 1.0',
+    '',
+    emailHtml,
+  ];
+  const raw = Buffer.from(messageParts.join('\n')).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+  return `Sent to ${toEmail}`;
+}
+
+// ── Push to Admin ──────────────────────────────────────────────────────────────
 app.post('/push-to-admin', async (req, res) => {
   const pin = req.headers['x-briefing-pin'] || req.body?.pin;
   if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
@@ -1113,127 +1204,54 @@ app.post('/push-to-admin', async (req, res) => {
 
   const results = { ghlTask: null, email: null, errors: [] };
 
-  // ── 1. Create GHL task ────────────────────────────────────────────────────
-  try {
-    const dueDate = new Date();
-    dueDate.setDate(dueDate.getDate() + 2); // default due in 2 days
+  // GHL task assigned to admin (TASK_ASSIGNEE_ID = existing admin assignee)
+  const taskResults = await createPushTask(title, notes, notionUrl, contactName, contactPhone, TASK_ASSIGNEE_ID);
+  results.ghlTask = taskResults.ghlTask;
+  results.errors.push(...taskResults.errors);
 
-    if (contactPhone) {
-      // Try to find a GHL contact and create a contact-linked task
-      try {
-        const cleanPhone = contactPhone.replace(/\D/g, '');
-        const contactRes = await axios.get(
-          `https://services.leadconnectorhq.com/contacts/?locationId=${GHL_LOCATION_ID}&query=${cleanPhone}`,
-          { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28' } }
-        );
-        const contact = contactRes.data.contacts?.[0];
-        if (contact) {
-          await axios.post(
-            `https://services.leadconnectorhq.com/contacts/${contact.id}/tasks`,
-            {
-              title,
-              body: notes || '',
-              dueDate: dueDate.toISOString(),
-              completed: false,
-              assignedTo: TASK_ASSIGNEE_ID,
-            },
-            { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
-          );
-          results.ghlTask = `Linked to contact: ${contact.firstName || contactName || contactPhone}`;
-        } else {
-          throw new Error('Contact not found');
-        }
-      } catch {
-        // Fall through to standalone task
-        await axios.post(
-          `https://services.leadconnectorhq.com/contacts/${GHL_LOCATION_ID}/tasks`,
-          {
-            title,
-            body: notes || '',
-            dueDate: dueDate.toISOString(),
-            completed: false,
-            assignedTo: TASK_ASSIGNEE_ID,
-          },
-          { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
-        ).catch(() => null);
-        results.ghlTask = 'Standalone task created';
-      }
-    } else {
-      // No contact — create standalone GHL task via location
-      // GHL doesn't have a true "standalone task" endpoint; use a dummy contact approach
-      // Instead we'll note it in the email and skip GHL task for non-contact items
-      results.ghlTask = 'No contact — task noted in email only';
-    }
-  } catch (err) {
-    results.errors.push('GHL task: ' + err.message);
+  // Email to admin
+  try {
+    results.email = await sendTaskEmail(
+      'info@movementclinicpt.com',
+      'ADMIN',
+      '#0065a3',
+      title, notes, notionUrl, contactName
+    );
+  } catch (emailErr) {
+    results.errors.push('Email: ' + emailErr.message);
   }
 
-  // ── 2. Send admin email via GHL webhook ───────────────────────────────────
+  res.json({ ok: true, results });
+});
+
+// ── Push to Clinic Director (Chris Bostwick) ───────────────────────────────────
+app.post('/push-to-director', async (req, res) => {
+  const pin = req.headers['x-briefing-pin'] || req.body?.pin;
+  if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
+
+  const { title, notes, notionUrl, contactName, contactPhone } = req.body;
+  if (!title) return res.status(400).json({ error: 'Missing title' });
+
+  const CHRIS_GHL_ID = 'awm68XlHfnAH8MVMIP4O';
+  const CHRIS_EMAIL = 'chris@movementclinicpt.com'; // update if different
+
+  const results = { ghlTask: null, email: null, errors: [] };
+
+  // GHL task assigned to Chris
+  const taskResults = await createPushTask(title, notes, notionUrl, contactName, contactPhone, CHRIS_GHL_ID);
+  results.ghlTask = taskResults.ghlTask;
+  results.errors.push(...taskResults.errors);
+
+  // Email to Chris
   try {
-    const ADMIN_EMAIL = 'info@movementclinicpt.com';
-    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
-
-    const emailHtml = `
-<div style="font-family:'Montserrat','Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;background:#F7F8FA;">
-  <div style="background:#232323;padding:20px 24px;border-bottom:3px solid #FFD70A;">
-    <p style="color:#F7F8FA;font-size:13px;font-weight:700;margin:0;letter-spacing:0.5px;">MOVEMENT CLINIC · ADMIN TASK</p>
-  </div>
-  <div style="padding:24px;">
-    <h2 style="font-size:18px;font-weight:700;color:#232323;margin:0 0 16px;">${title.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</h2>
-    ${contactName ? `<p style="font-size:13px;color:#6b7280;margin:0 0 8px;"><strong>Related to:</strong> ${contactName.replace(/</g,'&lt;')}</p>` : ''}
-    ${notes ? `
-    <div style="background:#fff;border:1px solid #e5e7eb;border-left:4px solid #0065a3;border-radius:0 8px 8px 0;padding:14px 16px;margin:16px 0;">
-      <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6b7280;margin:0 0 8px;">Notes from Jordan</p>
-      <p style="font-size:14px;color:#232323;line-height:1.6;margin:0;">${notes.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>
-    </div>` : ''}
-    ${notionUrl ? `<p style="margin:16px 0 0;"><a href="${notionUrl}" style="display:inline-block;background:#232323;color:#F7F8FA;padding:9px 18px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.5px;">Open in Notion →</a></p>` : ''}
-    <p style="font-size:11px;color:#9ca3af;margin:24px 0 0;border-top:1px solid #e5e7eb;padding-top:16px;">Assigned ${today} · Movement Clinic Daily Briefing</p>
-  </div>
-</div>`;
-
-    // Use GHL summary webhook to send email if available, otherwise log
-    if (process.env.GHL_SUMMARY_WEBHOOK) {
-      await axios.post(process.env.GHL_SUMMARY_WEBHOOK, {
-        to_email: ADMIN_EMAIL,
-        subject: `Admin Task: ${title}`,
-        email_body: emailHtml,
-        contact_name: contactName || 'General Task',
-      }, { headers: { 'Content-Type': 'application/json' } }).catch(e => results.errors.push('Webhook: ' + e.message));
-    }
-
-    // Also send directly via Gmail if service account available
-    try {
-      const { google } = require('googleapis');
-      const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
-      if (SERVICE_ACCOUNT_JSON.client_email) {
-        const auth = new google.auth.JWT({
-          email: SERVICE_ACCOUNT_JSON.client_email,
-          key: SERVICE_ACCOUNT_JSON.private_key,
-          scopes: ['https://www.googleapis.com/auth/gmail.compose'],
-          subject: process.env.GMAIL_USER,
-        });
-        await auth.authorize();
-        const gmail = google.gmail({ version: 'v1', auth });
-        const subject = `Admin Task: ${title}`;
-        const messageParts = [
-          `From: ${process.env.GMAIL_USER}`,
-          `To: ${ADMIN_EMAIL}`,
-          `Subject: ${subject}`,
-          'Content-Type: text/html; charset=utf-8',
-          'MIME-Version: 1.0',
-          '',
-          emailHtml,
-        ];
-        const raw = Buffer.from(messageParts.join('\n')).toString('base64')
-          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-        await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
-        results.email = `Sent to ${ADMIN_EMAIL}`;
-      }
-    } catch (emailErr) {
-      results.errors.push('Gmail: ' + emailErr.message);
-    }
-  } catch (err) {
-    results.errors.push('Email: ' + err.message);
+    results.email = await sendTaskEmail(
+      CHRIS_EMAIL,
+      'CLINIC DIRECTOR',
+      '#4b5563',
+      title, notes, notionUrl, contactName
+    );
+  } catch (emailErr) {
+    results.errors.push('Email: ' + emailErr.message);
   }
 
   res.json({ ok: true, results });
@@ -1344,16 +1362,24 @@ app.get('/briefing', (req, res) => {
     return `<button class="btn btn-done" onclick="markDone(this,'${esc(notionId)}','${esc(title).replace(/'/g,"\\'")}')">✓ Mark Done</button>`;
   }
 
-  function pushToAdminBtn(item) {
-    const payload = {
+  function makePushPayload(item) {
+    return {
       title: item.title || '',
       notionUrl: item.url || '',
       contactName: item.contact_name || '',
       contactPhone: item.contact_phone || '',
       suggestedNotes: item.suggested_notes || item.reason || '',
     };
-    const encoded = encodeURIComponent(JSON.stringify(payload));
-    return `<button class="btn btn-admin" onclick="openAdminModal(this,JSON.parse(decodeURIComponent('${encoded}')))">→ Push to Admin</button>`;
+  }
+
+  function pushToAdminBtn(item) {
+    const encoded = encodeURIComponent(JSON.stringify(makePushPayload(item)));
+    return `<button class="btn btn-admin" onclick="openModal(this,'admin',JSON.parse(decodeURIComponent('${encoded}')))">→ Admin</button>`;
+  }
+
+  function pushToDirectorBtn(item) {
+    const encoded = encodeURIComponent(JSON.stringify(makePushPayload(item)));
+    return `<button class="btn btn-director" onclick="openModal(this,'director',JSON.parse(decodeURIComponent('${encoded}')))">→ Director</button>`;
   }
 
   function renderItems(items, emptyMsg) {
@@ -1416,6 +1442,7 @@ app.get('/briefing', (req, res) => {
         <div class="card-actions" style="margin-top:10px;">
           ${markDoneBtn(item.notion_id, item.title)}
           ${pushToAdminBtn(item)}
+          ${pushToDirectorBtn(item)}
         </div>
       </div>`).join('');
   }
@@ -1684,6 +1711,15 @@ app.get('/briefing', (req, res) => {
   .btn-admin.loading { opacity: 0.4; cursor: wait; }
   .btn-admin.sent { background: #dcfce7; color: #166534; border-color: #bbf7d0; cursor: default; }
 
+  .btn-director {
+    background: #f3f4f6;
+    color: #4b5563;
+    border: 1px solid #d1d5db;
+  }
+  .btn-director:hover { background: #e5e7eb; color: #232323; border-color: #9ca3af; }
+  .btn-director.loading { opacity: 0.4; cursor: wait; }
+  .btn-director.sent { background: #dcfce7; color: #166534; border-color: #bbf7d0; cursor: default; }
+
   /* ── Modal ── */
   .modal-overlay {
     display: none;
@@ -1780,23 +1816,24 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
 
 `}
 
-<!-- Push to Admin Modal -->
+<!-- Push to Admin / Director Modal (shared) -->
 <div class="modal-overlay" id="adminModal">
   <div class="modal">
     <h3 id="modalTitle">Push to Admin</h3>
     <p class="modal-subtitle" id="modalSubtitle"></p>
-    <textarea id="modalNotes" placeholder="Notes for admin..."></textarea>
+    <textarea id="modalNotes" placeholder="Notes..."></textarea>
     <div class="modal-status" id="modalStatus"></div>
     <div class="modal-actions">
       <button class="btn modal-cancel" onclick="closeModal()">Cancel</button>
-      <button class="btn modal-confirm" onclick="confirmPush()">Send to Admin</button>
+      <button class="btn modal-confirm" onclick="confirmPush()">Send</button>
     </div>
   </div>
 </div>
 
 <script>
   const PIN = '${esc(BRIEFING_PIN)}';
-  let _modalData = {};
+  // _modalData tracks the active modal state: the data payload, the originating button, and the target route
+  let _modalData = null;
 
   function toggleAll(open) {
     document.querySelectorAll('details.section').forEach(d => d.open = open);
@@ -1826,21 +1863,41 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
     }
   }
 
-  function openAdminModal(btn, data) {
-    _modalData = { ...data, btn };
-    document.getElementById('modalTitle').textContent = data.title || 'Push to Admin';
+  // target: 'admin' or 'director'
+  function openModal(btn, target, data) {
+    // Always fully reset before opening — prevents stale state from prior interactions
+    _modalData = { ...data, btn, target };
+
+    const isDirector = target === 'director';
+    const confirmBtn = document.querySelector('.modal-confirm');
+
+    document.getElementById('modalTitle').textContent = isDirector
+      ? 'Push to Clinic Director'
+      : 'Push to Admin';
     document.getElementById('modalSubtitle').textContent = data.contactName
       ? 'Contact: ' + data.contactName
       : 'No contact associated';
     document.getElementById('modalNotes').value = data.suggestedNotes || '';
     document.getElementById('modalStatus').textContent = '';
+
+    // Reset confirm button in case it was left in a bad state from a prior send
+    confirmBtn.textContent = isDirector ? 'Send to Director' : 'Send to Admin';
+    confirmBtn.disabled = false;
+
     document.getElementById('adminModal').classList.add('active');
     setTimeout(() => document.getElementById('modalNotes').focus(), 50);
   }
 
   function closeModal() {
     document.getElementById('adminModal').classList.remove('active');
-    _modalData = {};
+    // Reset confirm button state so the next open starts clean
+    const confirmBtn = document.querySelector('.modal-confirm');
+    if (confirmBtn) {
+      confirmBtn.textContent = 'Send';
+      confirmBtn.disabled = false;
+    }
+    // Null out — not just empty object — so stale reads throw instead of silently proceeding
+    _modalData = null;
   }
 
   document.getElementById('adminModal').addEventListener('click', e => {
@@ -1848,39 +1905,44 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
   });
 
   async function confirmPush() {
+    if (!_modalData) return; // Guard against stale calls
     const notes = document.getElementById('modalNotes').value.trim();
     const status = document.getElementById('modalStatus');
     const confirmBtn = document.querySelector('.modal-confirm');
+    const isDirector = _modalData.target === 'director';
+    const endpoint = isDirector ? '/push-to-director' : '/push-to-admin';
+
     confirmBtn.textContent = 'Sending…';
     confirmBtn.disabled = true;
     status.textContent = '';
 
+    // Snapshot the data we need before closeModal() clears _modalData
+    const { title, notionUrl, contactName, contactPhone, btn: originBtn } = _modalData;
+
     try {
-      const res = await fetch('/push-to-admin', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-briefing-pin': PIN },
-        body: JSON.stringify({
-          title: _modalData.title,
-          notes,
-          notionUrl: _modalData.notionUrl,
-          contactName: _modalData.contactName || null,
-          contactPhone: _modalData.contactPhone || null,
-        }),
+        body: JSON.stringify({ title, notes, notionUrl, contactName: contactName || null, contactPhone: contactPhone || null }),
       });
-      if (!res.ok) throw new Error('Server error');
-      const data = await res.json();
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Server error ' + res.status);
+      }
 
-      // Mark the button as sent
-      if (_modalData.btn) {
-        _modalData.btn.textContent = '✓ Sent';
-        _modalData.btn.classList.add('sent');
-        _modalData.btn.disabled = true;
+      // Mark the originating button as sent before closing
+      if (originBtn) {
+        originBtn.textContent = '✓ Sent';
+        originBtn.classList.add('sent');
+        originBtn.disabled = true;
       }
       closeModal();
     } catch (err) {
-      status.textContent = 'Failed: ' + err.message;
-      confirmBtn.textContent = 'Send to Admin';
+      // On failure: restore button so user can retry, show error inline
+      status.textContent = '⚠ ' + err.message;
+      confirmBtn.textContent = isDirector ? 'Send to Director' : 'Send to Admin';
       confirmBtn.disabled = false;
+      // Do NOT clear _modalData — user may want to retry
     }
   }
 </script>
