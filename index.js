@@ -1285,6 +1285,61 @@ RETURN ONLY valid JSON:
   }
 });
 
+// ── Update Source of Truth Google Doc ──────────────────────────────────────
+// Called automatically after every index.js or index-daily-briefing.js deploy
+// PIN protected — same PIN as briefing
+const SOT_DOC_ID = process.env.SOT_DOC_ID || '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE1upms';
+
+app.post('/update-sot', async (req, res) => {
+  const pin = req.headers['x-briefing-pin'] || req.body?.pin;
+  if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
+
+  const { section, content: updateContent } = req.body;
+  if (!section || !updateContent) return res.status(400).json({ error: 'Missing section or content' });
+
+  try {
+    const { google } = require('googleapis');
+    const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+    if (!SERVICE_ACCOUNT_JSON.client_email) throw new Error('No service account configured');
+
+    const auth = new google.auth.JWT({
+      email: SERVICE_ACCOUNT_JSON.client_email,
+      key: SERVICE_ACCOUNT_JSON.private_key,
+      scopes: ['https://www.googleapis.com/auth/documents'],
+    });
+    await auth.authorize();
+    const docs = google.docs({ version: 'v1', auth });
+
+    // Read current doc to find end index
+    const doc = await docs.documents.get({ documentId: SOT_DOC_ID });
+    const endIndex = doc.data.body.content.reduce((max, el) => {
+      return el.endIndex ? Math.max(max, el.endIndex) : max;
+    }, 1);
+
+    const timestamp = new Date().toLocaleString('en-US', {
+      timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric',
+      year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true
+    }) + ' PT';
+
+    const insertText = `\n\n--- ${section} | Updated ${timestamp} ---\n${updateContent}`;
+
+    await docs.documents.batchUpdate({
+      documentId: SOT_DOC_ID,
+      requestBody: {
+        requests: [{
+          insertText: { location: { index: endIndex - 1 }, text: insertText }
+        }]
+      }
+    });
+
+    console.log(`SOT updated: ${section}`);
+    res.json({ ok: true, section, timestamp });
+  } catch (err) {
+    console.error('SOT update error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
