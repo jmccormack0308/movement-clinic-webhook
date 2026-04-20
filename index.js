@@ -1288,7 +1288,7 @@ RETURN ONLY valid JSON:
 // ── Update Source of Truth Google Doc ──────────────────────────────────────
 // Called automatically after every index.js or index-daily-briefing.js deploy
 // PIN protected — same PIN as briefing
-const SOT_DOC_ID = process.env.SOT_DOC_ID || '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE1upms';
+const SOT_DOC_ID = process.env.SOT_DOC_ID || '1FzeapjDGbuqvjnToalVlY5p8iEy4-VQKXB2lHLZEIY4';
 
 app.post('/update-sot', async (req, res) => {
   const pin = req.headers['x-briefing-pin'] || req.body?.pin;
