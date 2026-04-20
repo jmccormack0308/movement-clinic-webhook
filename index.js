@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const { Client: NotionClient } = require('@notionhq/client');
 
 // In-memory event log for daily digest — resets on deployment
 const dailyEventLog = [];
@@ -34,6 +35,10 @@ const JORDAN_EMAIL = 'jordan@movementclinicpt.com';
 const FROM_EMAIL = process.env.FROM_EMAIL || 'claude@updates.movementclinicpt.com';
 const TASK_ASSIGNEE_ID = '3EuCG6xznkq3A2CeDhDQ';
 const TASK_TITLE = 'Claude Assistant: Follow up from previous conversation thread';
+
+// ─── DAILY BRIEFING ───────────────────────────────────────────────────────────
+const BRIEFING_PIN = process.env.BRIEFING_PIN || '2365';
+let latestBriefing = null;
 
 // Pipelines where only one opportunity is allowed across all of them
 const LEAD_PIPELINE_IDS = [
@@ -2034,6 +2039,283 @@ app.get('/test-weekly-digest', async (req, res) => {
     }
   });
 });
+
+// ─── BRIEFING ROUTES ──────────────────────────────────────────────────────────
+
+// Called by daily briefing script each morning to save today's briefing
+app.post('/save-briefing', (req, res) => {
+  const pin = req.headers['x-briefing-pin'];
+  if (pin !== BRIEFING_PIN) return res.status(401).json({ error: 'Unauthorized' });
+  latestBriefing = req.body;
+  console.log(`📋 Briefing saved — ${new Date().toISOString()}`);
+  res.json({ success: true });
+});
+
+// Mark a Notion task as done
+app.post('/mark-done', async (req, res) => {
+  const pin = req.headers['x-briefing-pin'] || req.body.pin;
+  if (pin !== BRIEFING_PIN) return res.status(401).json({ error: 'Unauthorized' });
+  const { notionId } = req.body;
+  if (!notionId) return res.status(400).json({ error: 'notionId required' });
+  try {
+    const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
+    await notion.pages.update({
+      page_id: notionId,
+      properties: { Done: { checkbox: true } },
+    });
+    console.log(`✅ Notion task marked done: ${notionId}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Mark done failed:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Landing page — PIN protected dashboard
+app.get('/briefing', (req, res) => {
+  const pin = req.query.pin;
+  const WEBHOOK_URL = process.env.WEBHOOK_SERVER_URL || ('https://' + (process.env.RAILWAY_STATIC_URL || 'localhost:3000'));
+
+  if (pin !== BRIEFING_PIN) {
+    return res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Briefing</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f4f4f4;display:flex;align-items:center;justify-content:center;min-height:100vh;}
+    .card{background:white;border-radius:12px;padding:40px;max-width:360px;width:100%;box-shadow:0 4px 20px rgba(0,0,0,0.08);text-align:center;}
+    h1{font-size:22px;margin-bottom:8px;}
+    p{color:#666;font-size:14px;margin-bottom:24px;}
+    input{width:100%;padding:12px 16px;border:1px solid #ddd;border-radius:8px;font-size:20px;text-align:center;letter-spacing:8px;margin-bottom:16px;}
+    button{width:100%;padding:12px;background:#1a1a1a;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Daily Briefing</h1>
+    <p>Enter your PIN to continue</p>
+    <input type="password" id="pin" maxlength="6" placeholder="••••" autofocus>
+    <button onclick="go()">View Briefing</button>
+  </div>
+  <script>
+    function go(){window.location.href='/briefing?pin='+document.getElementById('pin').value;}
+    document.getElementById('pin').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
+  </script>
+</body>
+</html>`);
+  }
+
+  if (!latestBriefing) {
+    return res.send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Daily Briefing</title>
+<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f4f4f4;}
+.card{background:white;border-radius:12px;padding:40px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.08);}
+h1{font-size:20px;margin-bottom:8px;}p{color:#888;font-size:14px;}</style></head>
+<body><div class="card"><h1>No briefing yet</h1><p>Today's briefing hasn't run yet. Check back after 7am.</p></div></body></html>`);
+  }
+
+  const { analysis, draftLinks, taskCounts, emailCount, date } = latestBriefing;
+  const briefingDate = new Date(date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const PIN = BRIEFING_PIN;
+
+  const recurringTag = flag => flag ? `<span class="tag recurring">${flag}</span>` : '';
+
+  const priorityCards = (analysis.priority_actions_today || []).map(item => `
+    <div class="card-item urgent">
+      <div class="card-type">${item.type.toUpperCase()}</div>
+      <div class="card-title">${item.title}</div>
+      <div class="card-meta">${item.why}</div>
+      <div class="card-meta"><strong>Action:</strong> ${item.suggested_action}</div>
+      ${recurringTag(item.recurring_flag)}
+      <a class="btn btn-dark" href="${item.url}" target="_blank">Open ${item.type === 'email' ? 'in Gmail' : 'in Notion'} →</a>
+    </div>`).join('') || '<p class="empty">Nothing urgent today.</p>';
+
+  const emailCards = (analysis.emails_needing_response || []).map(item => {
+    const draft = draftLinks?.[item.message_id];
+    let draftHtml = '';
+    if (draft?.type === 'single') {
+      draftHtml = `<a class="btn btn-draft" href="${draft.url}" target="_blank">✏️ Open Draft</a>`;
+    } else if (draft?.type === 'ambiguous') {
+      draftHtml = `<div class="draft-row">
+        ${draft.urlYes ? `<a class="btn btn-yes" href="${draft.urlYes}" target="_blank">✓ ${draft.labelYes}</a>` : ''}
+        ${draft.urlNo ? `<a class="btn btn-no" href="${draft.urlNo}" target="_blank">✗ ${draft.labelNo}</a>` : ''}
+      </div>`;
+    }
+    return `
+    <div class="card-item">
+      <div class="card-title">${item.subject}</div>
+      <div class="card-meta">From: ${item.from}</div>
+      <div class="card-meta">${item.summary}</div>
+      <div class="card-meta"><strong>Suggested:</strong> ${item.suggested_action}</div>
+      ${recurringTag(item.recurring_flag)}
+      <div class="btn-row">
+        <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Gmail</a>
+        ${draftHtml}
+      </div>
+    </div>`;
+  }).join('') || '<p class="empty">No emails need a response.</p>';
+
+  const delegateCards = (analysis.delegate_to_admin || []).map(item => `
+    <div class="card-item delegate">
+      <div class="card-type">${item.type.toUpperCase()}</div>
+      <div class="card-title">${item.title}</div>
+      <div class="card-meta">${item.reason}</div>
+      <a class="btn btn-outline" href="${item.url}" target="_blank">Open →</a>
+    </div>`).join('') || '<p class="empty">Nothing to delegate.</p>';
+
+  const overdueCards = (analysis.overdue_items || []).map(item => `
+    <div class="card-item overdue">
+      <div class="card-title">${item.title}</div>
+      <div class="card-meta">Was due: ${item.due_date}</div>
+      ${recurringTag(item.recurring_flag)}
+      <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Notion</a>
+    </div>`).join('');
+
+  const upcomingCards = (analysis.upcoming_deadlines || []).map(item => `
+    <div class="card-item">
+      <div class="card-title">${item.title}</div>
+      <div class="card-meta">Due: ${item.due_date}</div>
+      <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Notion</a>
+    </div>`).join('');
+
+  const staleCards = (analysis.stale_tasks || []).map(item => `
+    <div class="card-item stale" id="stale-${item.notion_id}">
+      <div class="card-title">${item.title}</div>
+      <div class="card-meta">Created: ${item.created_date}</div>
+      <div class="card-meta"><strong>Recommendation:</strong> ${item.recommendation}</div>
+      <div class="btn-row">
+        <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Notion</a>
+        <button class="btn btn-done" onclick="markDone('${item.notion_id}',this)">✓ Mark Done</button>
+      </div>
+    </div>`).join('');
+
+  const noActionList = (analysis.no_action_needed || []).map(s => `<div class="no-action-item">${s}</div>`).join('');
+
+  res.send(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Daily Briefing — ${briefingDate}</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#efefef;color:#1a1a1a;}
+    .header{background:#1a1a1a;color:white;padding:18px 20px;position:sticky;top:0;z-index:100;}
+    .header h1{font-size:17px;font-weight:700;}
+    .header .date{font-size:12px;color:#888;margin-top:2px;}
+    .stats{display:flex;gap:14px;margin-top:8px;flex-wrap:wrap;}
+    .stat{font-size:12px;color:#aaa;}.stat strong{color:white;}
+    .container{max-width:700px;margin:0 auto;padding:18px 14px 60px;}
+    .section{margin-bottom:22px;}
+    .section-header{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#888;padding-bottom:7px;border-bottom:1px solid #ddd;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
+    .badge{background:#e0e0e0;color:#555;font-size:10px;padding:1px 7px;border-radius:10px;font-weight:700;}
+    .card-item{background:white;border-radius:8px;padding:13px 15px;margin-bottom:9px;border-left:3px solid #ddd;box-shadow:0 1px 3px rgba(0,0,0,0.06);}
+    .card-item.urgent{border-left-color:#e8612c;background:#fff8f4;}
+    .card-item.delegate{border-left-color:#2c7be8;background:#f4f8ff;}
+    .card-item.overdue{border-left-color:#e82c2c;background:#fff4f4;}
+    .card-item.stale{border-left-color:#c8a800;background:#fdfdf0;}
+    .card-type{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:1px;color:#999;margin-bottom:3px;}
+    .card-title{font-size:14px;font-weight:600;margin-bottom:4px;}
+    .card-meta{font-size:12px;color:#666;margin-bottom:3px;line-height:1.5;}
+    .tag{display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;margin:5px 0 3px;}
+    .tag.recurring{background:#fff3cd;color:#856404;}
+    .btn-row{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap;align-items:center;}
+    .draft-row{display:flex;gap:8px;flex-wrap:wrap;}
+    .btn{display:inline-block;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;cursor:pointer;border:none;font-family:inherit;}
+    .btn-dark{background:#1a1a1a;color:white;margin-top:9px;}
+    .btn-outline{background:transparent;color:#1a1a1a;border:1px solid #ccc;}
+    .btn-draft{background:#1a1a1a;color:white;}
+    .btn-yes{background:#2c7be8;color:white;}
+    .btn-no{background:#888;color:white;}
+    .btn-done{background:#27ae60;color:white;}
+    .btn-done:disabled{background:#ccc;cursor:default;}
+    .empty{font-size:13px;color:#aaa;padding:6px 0;}
+    .no-action-item{font-size:12px;color:#aaa;padding:4px 0;border-bottom:1px solid #f0f0f0;}
+    .no-action-item:last-child{border-bottom:none;}
+    .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#27ae60;color:white;padding:9px 18px;border-radius:8px;font-size:13px;font-weight:600;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:999;}
+    .toast.show{opacity:1;}
+  </style>
+</head>
+<body>
+<div class="header">
+  <h1>Daily Briefing</h1>
+  <div class="date">${briefingDate}</div>
+  <div class="stats">
+    <div class="stat"><strong>${taskCounts?.today || 0}</strong> due today</div>
+    <div class="stat"><strong>${taskCounts?.overdue || 0}</strong> overdue</div>
+    <div class="stat"><strong>${taskCounts?.upcoming || 0}</strong> this week</div>
+    <div class="stat"><strong>${emailCount || 0}</strong> unread</div>
+    <div class="stat"><strong>${analysis.emails_needing_response?.length || 0}</strong> need response</div>
+  </div>
+</div>
+<div class="container">
+
+  <div class="section">
+    <div class="section-header">🔥 Priority Actions Today <span class="badge">${analysis.priority_actions_today?.length || 0}</span></div>
+    ${priorityCards}
+  </div>
+
+  <div class="section">
+    <div class="section-header">✉️ Emails Needing Response <span class="badge">${analysis.emails_needing_response?.length || 0}</span></div>
+    ${emailCards}
+  </div>
+
+  <div class="section">
+    <div class="section-header">📋 Delegate to Admin <span class="badge">${analysis.delegate_to_admin?.length || 0}</span></div>
+    ${delegateCards}
+  </div>
+
+  ${analysis.overdue_items?.length ? `
+  <div class="section">
+    <div class="section-header">⚠️ Overdue <span class="badge">${analysis.overdue_items.length}</span></div>
+    ${overdueCards}
+  </div>` : ''}
+
+  ${analysis.upcoming_deadlines?.length ? `
+  <div class="section">
+    <div class="section-header">📅 Due This Week <span class="badge">${analysis.upcoming_deadlines.length}</span></div>
+    ${upcomingCards}
+  </div>` : ''}
+
+  ${analysis.stale_tasks?.length ? `
+  <div class="section">
+    <div class="section-header">🗂️ Stale Tasks — Review &amp; Clear <span class="badge">${analysis.stale_tasks.length}</span></div>
+    ${staleCards}
+  </div>` : ''}
+
+  ${analysis.no_action_needed?.length ? `
+  <div class="section">
+    <div class="section-header">ℹ️ No Action Needed</div>
+    ${noActionList}
+  </div>` : ''}
+
+</div>
+<div class="toast" id="toast"></div>
+<script>
+  const PIN='${PIN}';
+  const WEBHOOK='${WEBHOOK_URL}';
+  async function markDone(notionId,btn){
+    btn.disabled=true;btn.textContent='Marking...';
+    try{
+      const r=await fetch(WEBHOOK+'/mark-done',{method:'POST',headers:{'Content-Type':'application/json','x-briefing-pin':PIN},body:JSON.stringify({notionId})});
+      if(r.ok){
+        const card=document.getElementById('stale-'+notionId);
+        if(card){card.style.opacity='0.4';card.style.pointerEvents='none';}
+        btn.textContent='✓ Done';
+        toast('Marked as done in Notion');
+      } else {btn.disabled=false;btn.textContent='✓ Mark Done';toast('Failed — try again');}
+    } catch(e){btn.disabled=false;btn.textContent='✓ Mark Done';}
+  }
+  function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
+</script>
+</body>
+</html>`);
+});
+
+// ─── END BRIEFING ROUTES ──────────────────────────────────────────────────────
 
 app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on port ${PORT}`); });
 
