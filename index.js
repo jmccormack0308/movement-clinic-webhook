@@ -1257,6 +1257,47 @@ app.post('/push-to-director', async (req, res) => {
   res.json({ ok: true, results });
 });
 
+// ── Manual briefing trigger (proxies to Daily-Briefing service) ──────────────
+// Hitting this URL from a browser fires the briefing immediately without
+// needing to touch Railway UI. PIN protected.
+app.get('/run-briefing', async (req, res) => {
+  if (req.query.pin !== BRIEFING_PIN) return res.status(403).send('Forbidden');
+
+  const DAILY_BRIEFING_URL = process.env.DAILY_BRIEFING_URL;
+  if (!DAILY_BRIEFING_URL) {
+    return res.status(500).send('DAILY_BRIEFING_URL env var not set');
+  }
+
+  try {
+    // Fire the trigger on the Daily-Briefing service — don't await full completion
+    axios.get(`${DAILY_BRIEFING_URL}/trigger?pin=${BRIEFING_PIN}`).catch(() => null);
+  } catch {}
+
+  // Redirect straight to the briefing page — it'll be ready in ~60s
+  res.send(`
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>Briefing Triggered</title>
+      <style>
+        body { font-family: 'Montserrat', Arial, sans-serif; background: #F7F8FA; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { background: #232323; color: #F7F8FA; padding: 40px 48px; border-radius: 14px; border-bottom: 4px solid #FFD70A; text-align: center; max-width: 420px; }
+        h1 { font-size: 20px; font-weight: 700; margin: 0 0 10px; }
+        p { font-size: 13px; color: #aaa; margin: 0 0 24px; line-height: 1.6; }
+        a { display: inline-block; background: #FFD70A; color: #232323; text-decoration: none; padding: 10px 24px; border-radius: 8px; font-size: 13px; font-weight: 700; }
+      </style>
+    </head>
+    <body>
+      <div class="card">
+        <h1>🚀 Briefing Running</h1>
+        <p>The daily briefing has been triggered and is running in the background. Check back in about 60 seconds.</p>
+        <a href="/briefing?pin=${BRIEFING_PIN}">Open Briefing Page →</a>
+      </div>
+    </body>
+    </html>
+  `);
+});
+
 // ── Briefing landing page ──
 app.get('/briefing', (req, res) => {
   const { pin } = req.query;
