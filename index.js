@@ -1709,7 +1709,7 @@ app.get('/briefing', (req, res) => {
   } catch (e) { /* fall through to no-data state */ }
 
   const a = data?.analysis || {};
-  const draftLinks = data?.draftLinks || {};
+  const draftTexts = data?.draftTexts || {};
   const savedAt = data?.savedAt ? new Date(data.savedAt) : null;
   const dateStr = savedAt
     ? savedAt.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
@@ -1746,17 +1746,26 @@ app.get('/briefing', (req, res) => {
     return 'urgency-low';
   }
 
+  function mailtoLink(to, subject, body) {
+    return 'mailto:' + encodeURIComponent(to)
+      + '?subject=' + encodeURIComponent(subject)
+      + '&body=' + encodeURIComponent(body);
+  }
+
   function draftHtml(item) {
-    const d = draftLinks[item.message_id];
+    const d = draftTexts[item.message_id];
     if (!d) return '';
-    // Render draft buttons — web Gmail links work on desktop.
-    // On mobile the button opens Gmail web; if user has Gmail app installed
-    // the browser will prompt to open in app on most devices.
     if (d.type === 'single') {
-      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank" rel="noopener">✏️ Draft</a>`;
+      const href = mailtoLink(d.to || '', d.subject || '', d.body || '');
+      return `<a class="btn btn-draft" href="${esc(href)}">✏️ Reply Draft</a>`;
     }
-    return `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank" rel="noopener">✏️ ${esc(d.labelYes)}</a>
-            <a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank" rel="noopener">✏️ ${esc(d.labelNo)}</a>`;
+    if (d.type === 'ambiguous') {
+      const hrefYes = mailtoLink(d.to || '', d.subject || '', d.bodyYes || '');
+      const hrefNo  = mailtoLink(d.to || '', d.subject || '', d.bodyNo  || '');
+      return `<a class="btn btn-draft" href="${esc(hrefYes)}">✏️ ${esc(d.labelYes || 'Yes')}</a>
+              <a class="btn btn-draft-alt" href="${esc(hrefNo)}">✏️ ${esc(d.labelNo || 'Decline')}</a>`;
+    }
+    return '';
   }
 
   function markDoneBtn(notionId, title) {
@@ -1855,20 +1864,7 @@ app.get('/briefing', (req, res) => {
 
   function renderEmailItems(items, emptyMsg) {
     if (!items || items.length === 0) return `<p class="empty">${emptyMsg}</p>`;
-    return items.map(item => {
-      const d = draftLinks[item.message_id];
-      // Build deep link — on mobile, mailto: opens the mail app; gmail:// scheme works on iOS Gmail app
-      // For web, use the direct gmail URL
-      const gmailDeepLink = item.url || '#';
-      let draftBtns = '';
-      if (d && d.type === 'single') {
-        draftBtns = `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank">✏️ Open Draft</a>`;
-      } else if (d && d.type === 'ambiguous') {
-        draftBtns = `
-          ${d.urlYes ? `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank">✏️ ${esc(d.labelYes)}</a>` : ''}
-          ${d.urlNo ? `<a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank">✏️ ${esc(d.labelNo)}</a>` : ''}`;
-      }
-      return `
+    return items.map(item => `
       <div class="card" id="card-${esc(item.message_id || Math.random())}">
         <div class="card-header">
           <div class="card-left">
@@ -1881,13 +1877,12 @@ app.get('/briefing', (req, res) => {
         ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
         ${item.recurring_flag ? `<p class="card-why">${esc(item.recurring_flag)}</p>` : ''}
         <div class="card-actions" style="margin-top:10px;flex-wrap:wrap;gap:6px;">
-          <a class="btn btn-draft" href="${esc(gmailDeepLink)}" target="_blank">📬 Open Email</a>
-          ${draftBtns}
+          <a class="btn btn-draft" href="${esc(item.url || '#')}" target="_blank">📬 View Email</a>
+          ${draftHtml(item)}
           ${pushToAdminBtn(item)}
           ${pushToDirectorBtn(item)}
         </div>
-      </div>`;
-    }).join('');
+      </div>`).join('');
   }
 
   function renderCalendarEvents(items, emptyMsg) {
@@ -2069,6 +2064,10 @@ app.get('/briefing', (req, res) => {
     font-weight: 600;
     line-height: 1.4;
     word-break: break-word;
+    overflow-wrap: anywhere;
+    flex: 1;
+    min-width: 0;
+    display: block;
   }
   .card-title:hover { color: #0065a3; text-decoration: underline; }
 
@@ -2086,6 +2085,18 @@ app.get('/briefing', (req, res) => {
     flex-shrink: 0;
     flex-wrap: wrap;
     align-items: flex-start;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  @media (min-width: 520px) {
+    .card-actions {
+      width: auto;
+      margin-top: 0;
+    }
+    .card-header {
+      flex-wrap: nowrap;
+    }
   }
 
   /* ── Badges ── */
