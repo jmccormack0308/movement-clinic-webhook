@@ -1,9 +1,5 @@
 const express = require('express');
 const axios = require('axios');
-const { Client: NotionClient } = require('@notionhq/client');
-
-// In-memory event log for daily digest — resets on deployment
-const dailyEventLog = [];
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -14,31 +10,8 @@ const GHL_API_KEY = process.env.GHL_API_KEY;
 const QUO_API_KEY = process.env.QUO_API_KEY;
 const GHL_LOCATION_ID = '6oqyEZ6nlqPw4cDsaKzi';
 const GHL_SUMMARY_WEBHOOK = process.env.GHL_SUMMARY_WEBHOOK;
-const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
-const SLACK_CHANNEL_ID = process.env.SLACK_CHANNEL_ID;
-const SLACK_EVALS_SCHEDULED_CHANNEL_ID = 'C07T7PK0GAE';
-const SLACK_CONVERSIONS_CHANNEL_ID = 'C0AU8CDTN4R';
-const RAILWAY_FORM_URL = process.env.RAILWAY_STATIC_URL ? 'https://' + process.env.RAILWAY_STATIC_URL + '/post-eval' : null;
-
-// Slack user IDs for PT tagging
-const SLACK_USER_MAP = {
-  'Katy Vieira': 'U08REDY0146',
-  'Shane Abbott': 'U07SAF0R2NQ',
-  'TJ Aquino': 'U0A9DL4RTKN',
-  'Chris Bostwick': 'U091NMDKTFV',
-  'John Gan': 'U07TJC6GZFG',
-  'Jordan McCormack': 'U061MSYGTGR'
-};
-const TEAM_EMAIL = 'info@movementclinicpt.com';
-const JORDAN_EMAIL = 'jordan@movementclinicpt.com';
-const FROM_EMAIL = process.env.FROM_EMAIL || 'claude@updates.movementclinicpt.com';
 const TASK_ASSIGNEE_ID = '3EuCG6xznkq3A2CeDhDQ';
 const TASK_TITLE = 'Claude Assistant: Follow up from previous conversation thread';
-
-// ─── DAILY BRIEFING ───────────────────────────────────────────────────────────
-const BRIEFING_PIN = process.env.BRIEFING_PIN || '2365';
-let latestBriefing = null;
 
 // Pipelines where only one opportunity is allowed across all of them
 const LEAD_PIPELINE_IDS = [
@@ -336,15 +309,11 @@ Past Patient Reactivation (FyMN20G4jUAhNiDmhRXS):
 
 IMPORTANT: Do NOT assign Day/Week stages. The system handles day and week progression automatically for voicemail and no-contact outcomes. Only assign the named outcome stages listed above.
 
-CRITICAL STAGE PROTECTION: If the current stage is any "Eval Scheduled" stage across any pipeline, you must NEVER change the stage regardless of the call outcome. Set action to NO_ACTION on stage if the contact is currently in Eval Scheduled. A note will still be added. This protects confirmation calls and pre-eval follow-ups from incorrectly moving the opportunity card backward.
-
-EVAL CANCELLATION EXCEPTION: The only exception is if the patient explicitly and clearly states they want to CANCEL their upcoming evaluation — not a routine follow-up visit, but the actual evaluation appointment. If this is unambiguous, set eval_cancelled to true in your response. The system will create a manual review task for the admin team rather than automatically changing the stage.
-
 DECISION RULES:
 
 1. CONVERSATION TYPE CHECK: Determine what type of call this was.
 
-2. NAME EXTRACTION: Always attempt to extract the caller's full name from the transcript. Look for introductions, greetings, scheduling confirmations, or any moment where a name is stated. If a name is found, always set extracted_name to that full name regardless of what the contact record currently shows. Only set to null if truly no name is mentioned anywhere in the transcript.
+2. NAME EXTRACTION: If the contact name is unknown or a placeholder, attempt to extract the caller name from the transcript. Look for introductions. If found set extracted_name to that name, otherwise null.
 
 3. ATTRIBUTION: If this is a new contact with no existing pipeline, look for attribution signals in the transcript (Facebook ad mention, Google search, referral, website). Use this to select the most appropriate pipeline. Default to Incoming Calls if unclear.
 
@@ -352,9 +321,9 @@ DECISION RULES:
 
 5. Based on the transcript, determine the outcome:
 
-OUTCOME A - EVAL SCHEDULED: Person agreed to come in for an evaluation, assessment, or free screen (assessment and evaluation are the same thing). Move to Eval Scheduled stage. Log appointment details if mentioned.
+OUTCOME A - EVAL SCHEDULED: Person agreed to come in for an evaluation or free screen. Move to Eval Scheduled stage. Log appointment details if mentioned.
 
-OUTCOME B - NEEDS FOLLOW UP: Person gave an objection but did not disengage. Common objections: wants insurance/in-network care, needs to speak with spouse, needs to think about it, price concerns, not ready yet, requested follow-up by email or phone in a specific timeframe (e.g. "reach out in 2-3 weeks", "email me next month"). Move to the most appropriate Needs Follow Up or Talked To But Didnt Schedule stage. Log the specific objection. If a timeframe was mentioned, extract follow_up_days.
+OUTCOME B - NEEDS FOLLOW UP: Person gave an objection but did not disengage. Common objections: wants insurance/in-network care, needs to speak with spouse, needs to think about it, price concerns, not ready yet. Move to the most appropriate Needs Follow Up or Talked To But Didnt Schedule stage. Log the specific objection.
 
 OUTCOME C - ON HOLD: Person explicitly said they want to be contacted again at a specific future time. Move to On Hold or Call Later stage. Log the timeframe.
 
@@ -366,14 +335,10 @@ OUTCOME F - VOICEMAIL: A voicemail was left. The system will automatically advan
 
 OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The system will automatically advance the day/week stage. Set action to UPDATE and return current pipeline ID and null for new_stage_id. Log the attempt.
 
-OUTCOME H - NON_LEAD_CALL: The caller is clearly not a potential patient or lead. This includes: insurance companies calling to verify patient visits, law offices asking about lien arrangements, vendors or sales callers, physician offices calling about fax numbers or referral paperwork, wrong department calls, or any other administrative/business call unrelated to someone seeking PT services. Set action to NO_ACTION. No pipeline changes, no contact creation.
-
-OUTCOME I - RECORDS_REQUEST: An existing patient is calling specifically to request copies of their own records or documentation. This must be the patient themselves calling, not a third party asking about a patient. Set action to NO_ACTION. The system will add a note and create a task for the admin team.
-
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NON_LEAD_CALL or RECORDS_REQUEST","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","extracted_email":"email address mentioned in transcript or null","team_member":"name of clinic staff member on the call or null","plain_language_outcome":"1-2 sentence plain English summary. If outcome is EVAL_SCHEDULED, start with Evaluation scheduled and include the date, time, and PT name if mentioned. If outcome is NEEDS_FOLLOW_UP, state what follow-up was agreed and when. Never use the word follow-up when an eval was actually booked. No jargon or pipeline codes.","follow_up_days":null,"follow_up_date":"YYYY-MM-DD if a firm follow-up date was set otherwise null","follow_up_time":"HH:MM AM/PM if a firm follow-up time was set. If end of day or similar vague language is used default to 6:15 PM. If 6:15 PM is not workable use 6:30 PM. Otherwise null if no follow-up call discussed","clinical_summary":"only if real conversation — brief summary of body areas discussed, patient goals, and any package options mentioned. null if voicemail or no contact","red_flags_detail":"plain language description of any price sensitivity or objections using these categories as reference: Too Expensive, Wants to Explore In-Network Care, Time Commitment, Not the Right Time, Needs to Talk to Spouse, Needs to Think About It, Business Hours Dont Work. Use conversational phrasing like Potentially Price Averse or Considering In-Network Options. null if none","confidence_score":85,"confidence_reason":"1 sentence explanation of why you scored confidence at this level — e.g. clear conversation with explicit booking, or short ambiguous call with unclear intent","eval_cancelled":false,"evaluating_pt":"name of the PT the evaluation was booked with — must be one of: Chris Bostwick, John Gan, TJ Aquino, Jordan McCormack. null if not mentioned"}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -382,29 +347,11 @@ async function getCallDetails(callId) {
   return response.data;
 }
 
-// Map Quo user IDs to team member names
-const QUO_USER_MAP = {
-  'USA0DVhDhZ': 'John Gan',
-  'USD3Kno24F': 'Shane Abbott',
-  'USHRRvAybv': 'Katy Vieira',
-  'USLnAV6kpl': 'Jordan McCormack',
-  'USnPowYhI2': 'TJ Aquino',
-  'USYIrAQecv': 'Chris Bostwick'
-};
-
 function extractContactPhone(callData) {
   const participants = callData.data?.participants || callData.participants || [];
   for (const p of participants) {
     if (!CLINIC_PHONE_NUMBERS.includes(p)) return p;
   }
-  return null;
-}
-
-function extractTeamMember(callData) {
-  const data = callData.data || callData;
-  // answeredBy is set for answered calls, userId is the initiator
-  const userId = data.answeredBy || data.userId || data.initiatedBy || null;
-  if (userId && QUO_USER_MAP[userId]) return QUO_USER_MAP[userId];
   return null;
 }
 
@@ -480,19 +427,6 @@ async function createGHLOpportunity(contactId, pipelineId, stageId, name) {
   return response.data.opportunity;
 }
 
-async function updateGHLOpportunityName(opportunityId, name) {
-  try {
-    await axios.put(
-      `https://services.leadconnectorhq.com/opportunities/${opportunityId}`,
-      { name },
-      { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
-    );
-    console.log('Opportunity name updated to: ' + name);
-  } catch (err) {
-    console.error('Failed to update opportunity name:', err.response?.data || err.message);
-  }
-}
-
 async function updateGHLOpportunity(opportunityId, pipelineId, stageId, value) {
   const body = { pipelineId, pipelineStageId: stageId };
   if (value !== null && value !== undefined) body.monetaryValue = value;
@@ -511,12 +445,12 @@ async function addNoteToContact(contactId, noteText) {
   );
 }
 
-async function createGHLTask(contactId, title, dueDate, body) {
+async function createGHLTask(contactId, title, dueDate) {
   await axios.post(
     `https://services.leadconnectorhq.com/contacts/${contactId}/tasks`,
     {
       title,
-      body: body || 'Generated by Claude post-call automation based on contact request.',
+      body: 'Generated by Claude post-call automation based on contact request.',
       dueDate: dueDate.toISOString(),
       completed: false,
       assignedTo: TASK_ASSIGNEE_ID
@@ -525,581 +459,6 @@ async function createGHLTask(contactId, title, dueDate, body) {
   );
 }
 
-async function sendEmailAndSlack({ to, subject, html, slackMessage }) {
-  // Send email via Resend
-  try {
-    await axios.post('https://api.resend.com/emails', {
-      from: FROM_EMAIL,
-      to: Array.isArray(to) ? to : [to],
-      subject,
-      html
-    }, {
-      headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' }
-    });
-    console.log('Email sent via Resend to: ' + (Array.isArray(to) ? to.join(', ') : to));
-  } catch (err) {
-    console.error('Resend email failed:', err.response?.data || err.message);
-  }
-
-  // Send Slack message via Slack API
-  try {
-    await axios.post('https://slack.com/api/chat.postMessage', {
-      channel: SLACK_CHANNEL_ID,
-      text: slackMessage
-    }, {
-      headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
-    });
-    console.log('Slack message sent successfully');
-  } catch (err) {
-    console.error('Slack message failed:', err.response?.data || err.message);
-  }
-}
-
-// Send error notification to Slack
-async function sendSlackError(context, errorMessage) {
-  try {
-    await axios.post('https://slack.com/api/chat.postMessage', {
-      channel: SLACK_CHANNEL_ID,
-      blocks: [
-        { type: 'header', text: { type: 'plain_text', text: '⚠️ Automation Error', emoji: true } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*Context:* ' + context } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*Error:* ' + errorMessage } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*Action Required:* Check Railway logs and verify GHL manually.' } }
-      ],
-      text: 'Automation Error: ' + context
-    }, {
-      headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
-    });
-  } catch (err) {
-    console.error('Failed to send Slack error notification:', err.message);
-  }
-}
-
-// Retry wrapper — attempts once, waits 5 seconds, tries again, then Slack error
-async function withRetry(fn, context) {
-  try {
-    return await fn();
-  } catch (firstErr) {
-    console.error(context + ' failed, retrying in 5 seconds:', firstErr.message);
-    await new Promise(resolve => setTimeout(resolve, 5000));
-    try {
-      return await fn();
-    } catch (secondErr) {
-      const errMsg = secondErr.response?.data ? JSON.stringify(secondErr.response.data) : secondErr.message;
-      console.error(context + ' failed after retry:', errMsg);
-      await sendSlackError(context, errMsg);
-      throw secondErr;
-    }
-  }
-}
-
-// Log event to in-memory store for daily digest
-async function logEventToRedis(eventData) {
-  dailyEventLog.push({
-    ...eventData,
-    timestamp: new Date().toLocaleString('en-US', { timeZone: 'America/Los_Angeles', hour: 'numeric', minute: '2-digit', hour12: true }) + ' PT'
-  });
-  console.log('Event logged for daily digest — total today: ' + dailyEventLog.length);
-}
-
-// Send Slack notification only (no email)
-async function sendSlackMessage(messageOrBlocks) {
-  try {
-    const payload = { channel: SLACK_CHANNEL_ID };
-    if (typeof messageOrBlocks === 'string') {
-      payload.text = messageOrBlocks;
-    } else {
-      payload.text = messageOrBlocks.fallback || 'Claude AI Assistant update';
-      payload.blocks = messageOrBlocks.blocks;
-    }
-    await axios.post('https://slack.com/api/chat.postMessage', payload, {
-      headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
-    });
-    console.log('Slack message sent');
-  } catch (err) {
-    console.error('Slack message failed:', err.response?.data || err.message);
-  }
-}
-
-function capitalizeFullName(name) {
-  if (!name) return 'Unknown';
-  return name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(' ');
-}
-
-function buildCallSlackBlocks(params) {
-  const { contactName, contactPhone, callTime, teamMember, outcome, pipeline, stageDisplay, redFlags, clinicalSummary, isNewOpportunity, confidenceScore, confidenceReason, opportunityId } = params;
-  const ghlUrl = opportunityId
-    ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + opportunityId
-    : null;
-  const nameDisplay = ghlUrl
-    ? '<' + ghlUrl + '|' + capitalizeFullName(contactName) + '>'
-    : capitalizeFullName(contactName);
-  const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'null';
-  const hasSummary = clinicalSummary && clinicalSummary !== 'null' && clinicalSummary !== 'None';
-  const pipelineDisplay = isNewOpportunity
-    ? 'New opportunity — added to ' + pipeline + ' pipeline'
-    : 'Pre-existed in ' + pipeline + ' pipeline';
-
-  const score = parseInt(confidenceScore) || 0;
-  const confidenceEmoji = score >= 90 ? ':large_green_circle:' : score >= 70 ? ':large_yellow_circle:' : ':red_circle:';
-  const confidenceText = confidenceEmoji + ' *' + score + '% Confident in Transcript Interpretation*';
-
-  const blocks = [
-    { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
-    { type: 'section', text: { type: 'mrkdwn', text: confidenceText } },
-    { type: 'divider' },
-    { type: 'section', fields: [
-      { type: 'mrkdwn', text: '*Name*\n' + nameDisplay },
-      { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') },
-      { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
-      { type: 'mrkdwn', text: '*Team Member on Phone Call*\n' + (teamMember || 'Not identified') }
-    ]},
-    { type: 'divider' },
-    { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See GHL for details') } }
-  ];
-
-  if (hasSummary) {
-    blocks.push({ type: 'divider' });
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '*Summary*\n' + clinicalSummary } });
-  }
-
-  blocks.push({ type: 'divider' });
-  blocks.push({ type: 'section', fields: [
-    { type: 'mrkdwn', text: '*Pipeline*\n' + pipelineDisplay },
-    { type: 'mrkdwn', text: '*Stage*\n' + (stageDisplay || 'Unknown') }
-  ]});
-  blocks.push({ type: 'divider' });
-  blocks.push({ type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } });
-
-  return { fallback: 'Claude AI Assistant — Call Summary for ' + capitalizeFullName(contactName), blocks };
-}
-
-function buildEvalSlackBlocks(params) {
-  const { patientName, patientPhone, evalDate, evaluatingPT, planOfCarePT, outcome, stageDisplay, redFlags, opportunityId } = params;
-  const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'None identified.';
-  const ghlUrl = opportunityId
-    ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + opportunityId
-    : null;
-  const evalNameDisplay = ghlUrl
-    ? '<' + ghlUrl + '|' + capitalizeFullName(patientName) + '>'
-    : capitalizeFullName(patientName);
-  return {
-    fallback: 'Claude AI Assistant — Post-Eval Summary for ' + patientName,
-    blocks: [
-      { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Post-Eval Summary', emoji: true } },
-      { type: 'divider' },
-      { type: 'section', fields: [
-        { type: 'mrkdwn', text: '*Name*\n' + evalNameDisplay },
-        { type: 'mrkdwn', text: '*Phone*\n' + (patientPhone || 'Unknown') }
-      ]},
-      { type: 'divider' },
-      { type: 'section', fields: [
-        { type: 'mrkdwn', text: '*Date*\n' + (evalDate || 'Unknown') },
-        { type: 'mrkdwn', text: '*Evaluating PT*\n' + (evaluatingPT || 'Unknown') }
-      ]},
-      { type: 'section', text: { type: 'mrkdwn', text: '*Plan of Care PT*\n' + (planOfCarePT || 'Unknown') } },
-      { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (outcome || 'See email for full details') } },
-      { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: '*Pipeline Update*\nStage: ' + (stageDisplay || 'Unknown') } },
-      { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: (hasFlag ? ':warning: ' : ':white_check_mark: ') + '*Red Flags to Be Aware Of*\n' + (redFlags || 'None') } }
-    ]
-  };
-}
-
-// Send daily digest email pulling from Google Sheet via Sheets API
-async function sendDailyDigest() {
-  try {
-    const now = new Date();
-    const today = now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }); // e.g. 4/17/2026
-    const todayParts = today.split('/'); // ['4','17','2026']
-    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    const todayMonth = monthNames[parseInt(todayParts[0]) - 1]; // 'Apr'
-    const todayDay = todayParts[1]; // '17'
-    const dateLabel = now.toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-
-    let sheetRows = [];
-    try {
-      const csvUrl = 'https://docs.google.com/spreadsheets/d/' + CALL_ACTIVITY_SHEET_ID + '/export?format=csv';
-      const sheetResponse = await axios.get(csvUrl);
-      const lines = sheetResponse.data.split('\n').filter(l => l.trim());
-      const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-      for (let i = 1; i < lines.length; i++) {
-        const cols = lines[i].split(',').map(c => c.replace(/"/g, '').trim());
-        const row = {};
-        headers.forEach((h, idx) => { row[h] = cols[idx] || ''; });
-        // Match timestamps like "Apr 17, 2026" or "4/17/2026"
-        const ts = row['timestamp'] || '';
-        const matchesDate = ts.includes(todayMonth + ' ' + todayDay) || ts.includes(today);
-        if (matchesDate) sheetRows.push(row);
-      }
-      console.log('Daily digest: total sheet rows:', lines.length - 1, '— matching today:', sheetRows.length);
-    } catch (sheetErr) {
-      console.error('Failed to fetch Google Sheet:', sheetErr.message);
-      sheetRows = dailyEventLog.map(e => ({
-        timestamp: e.timestamp, contact_name: e.contact,
-        outcome: e.summary, pipeline: '', new_stage: '', confidence_score: '', red_flags: ''
-      }));
-    }
-
-    if (!sheetRows || sheetRows.length === 0) {
-      console.log('No events to digest today');
-      return;
-    }
-
-    // Build hardcoded HTML template
-    const eventRows = sheetRows.map(r => {
-      const score = parseInt(r['confidence_score']) || 0;
-      const scoreColor = score >= 90 ? '#10b981' : score >= 70 ? '#f59e0b' : '#ef4444';
-      const hasFlag = r['red_flags'] && r['red_flags'] !== 'None' && r['red_flags'] !== '';
-      return '<tr>' +
-        '<td style="padding:10px 12px;font-size:13px;color:#1e293b;border-bottom:1px solid #f1f5f9;font-weight:600;">' + (r['contact_name'] || 'Unknown') + '<div style="font-size:11px;color:#94a3b8;font-weight:400;">' + (r['contact_phone'] || '') + '</div></td>' +
-        '<td style="padding:10px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;">' + (r['team_member'] || '—') + '</td>' +
-        '<td style="padding:10px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;">' + (r['pipeline'] || '—') + '<div style="font-size:11px;color:#94a3b8;">' + (r['previous_stage'] && r['new_stage'] && r['previous_stage'] !== r['new_stage'] ? r['previous_stage'] + ' → ' + r['new_stage'] : (r['new_stage'] || '')) + '</div></td>' +
-        '<td style="padding:10px 12px;font-size:12px;color:#475569;border-bottom:1px solid #f1f5f9;max-width:180px;">' + (r['outcome'] || '—') + '</td>' +
-        '<td style="padding:10px 12px;font-size:13px;font-weight:700;color:' + scoreColor + ';border-bottom:1px solid #f1f5f9;text-align:center;">' + (r['confidence_score'] || '—') + '</td>' +
-        '<td style="padding:10px 12px;font-size:12px;color:' + (hasFlag ? '#ef4444' : '#94a3b8') + ';border-bottom:1px solid #f1f5f9;">' + (hasFlag ? r['red_flags'] : 'None') + '</td>' +
-        '</tr>';
-    }).join('');
-
-    const evalCount = sheetRows.filter(r => (r['new_stage'] || '').toLowerCase().includes('eval')).length;
-    const flagCount = sheetRows.filter(r => r['red_flags'] && r['red_flags'] !== 'None' && r['red_flags'] !== '').length;
-    const avgConf = sheetRows.length > 0 ? Math.round(sheetRows.reduce((sum, r) => sum + (parseInt(r['confidence_score']) || 0), 0) / sheetRows.length) : 0;
-
-    const digestHtml = '<!DOCTYPE html><html><body style="margin:0;padding:20px 0;background:#f1f5f9;font-family:Montserrat,Segoe UI,Arial,sans-serif;">' +
-      '<div style="max-width:700px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">' +
-      '<div style="background:#1e3a5f;padding:32px;text-align:center;">' +
-      '<div style="font-size:20px;font-weight:700;color:#ffffff;margin-bottom:6px;">Movement Clinic — Daily Operations Digest</div>' +
-      '<div style="font-size:13px;color:#93c5fd;">' + dateLabel + '</div>' +
-      '</div>' +
-      '<div style="padding:24px 32px;">' +
-      '<table style="width:100%;border-collapse:collapse;margin-bottom:24px;"><tr>' +
-      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #2563eb;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + sheetRows.length + '</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Total Calls</div></div></td>' +
-      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #10b981;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + evalCount + '</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Evals Booked</div></div></td>' +
-      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #f59e0b;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + avgConf + '%</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Avg Confidence</div></div></td>' +
-      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:16px;text-align:center;border-left:4px solid #ef4444;"><div style="font-size:28px;font-weight:700;color:#1e293b;">' + flagCount + '</div><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:4px;">Red Flags</div></div></td>' +
-      '</tr></table>' +
-      '<table style="width:100%;border-collapse:collapse;">' +
-      '<tr style="background:#f8fafc;">' +
-      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Contact</th>' +
-      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Team Member</th>' +
-      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Pipeline / Stage</th>' +
-      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Outcome</th>' +
-      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:center;border-bottom:2px solid #e2e8f0;">Confidence</th>' +
-      '<th style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#64748b;text-align:left;border-bottom:2px solid #e2e8f0;">Red Flags</th>' +
-      '</tr>' +
-      eventRows +
-      '</table>' +
-      '<div style="margin-top:20px;text-align:center;font-size:11px;color:#94a3b8;">Generated by Movement Clinic Claude AI &nbsp;&bull;&nbsp; ' + dateLabel + '</div>' +
-      '</div></div></body></html>';
-
-    await axios.post('https://api.resend.com/emails', {
-      from: FROM_EMAIL,
-      to: [JORDAN_EMAIL],
-      subject: 'Daily Operations Digest — ' + dateLabel + ' (' + sheetRows.length + ' calls)',
-      html: digestHtml
-    }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
-
-    console.log('Daily digest sent — ' + sheetRows.length + ' events');
-    dailyEventLog.length = 0;
-  } catch (err) {
-    console.error('Daily digest failed:', err.response?.data || err.message);
-    await sendSlackError('Daily Digest Failed', err.message || 'Unknown error');
-  }
-}
-
-// Schedule daily digest at 6pm PT
-function scheduleDailyDigest() {
-  const now = new Date();
-  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-  const target = new Date(pst);
-  target.setHours(18, 0, 0, 0);
-  if (pst >= target) target.setDate(target.getDate() + 1);
-  const msUntilDigest = target - pst;
-  console.log('Daily digest scheduled in ' + Math.round(msUntilDigest / 60000) + ' minutes');
-  setTimeout(async () => {
-    await sendDailyDigest();
-    setInterval(sendDailyDigest, 24 * 60 * 60 * 1000);
-  }, msUntilDigest);
-}
-
-scheduleDailyDigest();
-
-async function updateClinicMetricsSheet() {
-  try {
-    const { google } = require('googleapis');
-    const serviceAccountJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-    if (!serviceAccountJson) {
-      console.error('GOOGLE_SERVICE_ACCOUNT_JSON not set');
-      await sendSlackError('Monthly Metrics Update', 'GOOGLE_SERVICE_ACCOUNT_JSON environment variable not configured');
-      return;
-    }
-
-    const serviceAccount = JSON.parse(serviceAccountJson);
-    const auth = new google.auth.GoogleAuth({
-      credentials: serviceAccount,
-      scopes: ['https://www.googleapis.com/auth/spreadsheets']
-    });
-    const sheets = google.sheets({ version: 'v4', auth });
-
-    // Get last month's date info
-    const now = new Date();
-    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const year = lastMonth.getFullYear();
-    const month = lastMonth.getMonth(); // 0-indexed
-    const monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    console.log('Updating metrics for ' + monthNames[month] + ' ' + year);
-
-    // Read last month's eval data from eval sheet
-    const csvUrl = 'https://docs.google.com/spreadsheets/d/' + EVAL_SHEET_ID + '/export?format=csv&gid=1955906194';
-    const csvResponse = await axios.get(csvUrl);
-    const lines = csvResponse.data.split('\n').filter(l => l.trim());
-    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-    const rows = lines.slice(1).map(line => {
-      const cols = line.split(',').map(c => c.replace(/"/g, '').trim());
-      const row = {};
-      headers.forEach((h, i) => { row[h] = cols[i] || ''; });
-      return row;
-    });
-
-    // Filter to last month by evaluation_date
-    const lastMonthRows = rows.filter(r => {
-      if (!r.evaluation_date) return false;
-      const d = new Date(r.evaluation_date);
-      return d.getMonth() === month && d.getFullYear() === year;
-    });
-
-    console.log('Found ' + lastMonthRows.length + ' evals for ' + monthNames[month] + ' ' + year);
-
-    const col = YEAR_COLS[year];
-    if (!col) {
-      console.error('Year ' + year + ' not in column map');
-      return;
-    }
-
-    // EVALS table starts at row 3, CONVERSIONS table starts at row 19 (after 14 data rows + header rows)
-    // Based on layout: header row 1, EVALS rows 3-14, then gap, VISITS rows
-    const evalsRow = MONTH_ROWS[month];
-    const conversionsRow = evalsRow + 19; // VISITS (Conversions) table: Jan=row 22, so row 3 + 19 = 22
-
-    // Process each PT tab + clinic total
-    for (const [ptKey, tabName] of Object.entries(PT_SHEET_TABS)) {
-      let evalCount, conversionCount;
-
-      if (ptKey === 'clinic') {
-        evalCount = lastMonthRows.length;
-        conversionCount = lastMonthRows.filter(r => r.outcome === 'Converted').length;
-      } else {
-        const ptRows = lastMonthRows.filter(r =>
-          r.evaluating_pt === ptKey || r.plan_of_care_pt === ptKey
-        );
-        evalCount = ptRows.length;
-        conversionCount = ptRows.filter(r => r.outcome === 'Converted').length;
-      }
-
-      // Update EVALS cell
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: CLINIC_METRICS_SHEET_ID,
-        range: tabName + '!' + col + evalsRow,
-        valueInputOption: 'RAW',
-        resource: { values: [[evalCount]] }
-      });
-
-      // Update CONVERSIONS cell
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: CLINIC_METRICS_SHEET_ID,
-        range: tabName + '!' + col + conversionsRow,
-        valueInputOption: 'RAW',
-        resource: { values: [[conversionCount]] }
-      });
-
-      console.log(tabName + ': ' + evalCount + ' evals, ' + conversionCount + ' conversions');
-    }
-
-    console.log('Clinic metrics sheet updated for ' + monthNames[month] + ' ' + year);
-
-    // Send monthly summary email
-    const totalEvals = lastMonthRows.length;
-    const totalConverted = lastMonthRows.filter(r => r.outcome === 'Converted').length;
-    const totalPending = lastMonthRows.filter(r => r.outcome === 'Pending').length;
-    const totalLost = lastMonthRows.filter(r => r.outcome === 'Lost').length;
-    const convRate = totalEvals > 0 ? Math.round((totalConverted / totalEvals) * 100) : 0;
-
-    const ptBreakdown = Object.keys(PT_SHEET_TABS).filter(k => k !== 'clinic').map(pt => {
-      const ptRows = lastMonthRows.filter(r => r.evaluating_pt === pt || r.plan_of_care_pt === pt);
-      const ptConv = ptRows.filter(r => r.outcome === 'Converted').length;
-      return pt + ': ' + ptRows.length + ' evals, ' + ptConv + ' converted (' + (ptRows.length > 0 ? Math.round(ptConv/ptRows.length*100) : 0) + '%)';
-    }).join('\\n');
-
-    const objections = lastMonthRows
-      .filter(r => r.outcome === 'Lost' && r.objection_category)
-      .reduce((acc, r) => { acc[r.objection_category] = (acc[r.objection_category] || 0) + 1; return acc; }, {});
-    const objectionSummary = Object.entries(objections).sort((a,b) => b[1]-a[1]).map(([k,v]) => k + ': ' + v).join('\\n') || 'None';
-
-    // Build hardcoded PT rows — name on its own line, stats below
-    const ptColors = ['#2563eb', '#10b981', '#f59e0b', '#8b5cf6'];
-    const ptRowsHtml = Object.keys(PT_SHEET_TABS).filter(k => k !== 'clinic').map((pt, idx) => {
-      const ptData = lastMonthRows.filter(r => r.evaluating_pt === pt || r.plan_of_care_pt === pt);
-      const ptConv = ptData.filter(r => r.outcome === 'Converted').length;
-      const ptRate = ptData.length > 0 ? Math.round(ptConv / ptData.length * 100) : 0;
-      return '<div style="border-left:4px solid ' + ptColors[idx % ptColors.length] + ';background:#f8fafc;border-radius:0 8px 8px 0;padding:14px 20px;margin-bottom:10px;">' +
-        '<div style="font-size:15px;font-weight:700;color:#1e293b;margin-bottom:6px;">' + pt + '</div>' +
-        '<div style="font-size:13px;color:#64748b;">' + ptData.length + ' evals &nbsp;&bull;&nbsp; ' + ptConv + ' converted &nbsp;&bull;&nbsp; ' + ptRate + '% conversion rate</div>' +
-        '</div>';
-    }).join('');
-
-    const objectionRowsHtml = Object.entries(objections).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
-      '<tr><td style="padding:8px 12px;font-size:13px;color:#334155;border-bottom:1px solid #e2e8f0;">' + k + '</td>' +
-      '<td style="padding:8px 12px;font-size:13px;font-weight:700;color:#334155;text-align:right;border-bottom:1px solid #e2e8f0;">' + v + '</td></tr>'
-    ).join('');
-
-    const statCard = (value, label, color) =>
-      '<td style="width:25%;padding:8px;"><div style="background:#f8fafc;border-radius:8px;padding:20px 12px;text-align:center;border-left:4px solid ' + color + ';">' +
-      '<div style="font-size:32px;font-weight:700;color:#1e293b;">' + value + '</div>' +
-      '<div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-top:6px;">' + label + '</div>' +
-      '</div></td>';
-
-    const monthlyHtml = '<!DOCTYPE html><html><body style="margin:0;padding:20px 0;background:#f1f5f9;font-family:Montserrat,Segoe UI,Arial,sans-serif;">' +
-      '<div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">' +
-      '<div style="background:#1e3a5f;padding:40px 32px;text-align:center;">' +
-      '<div style="font-size:22px;font-weight:700;color:#ffffff;margin-bottom:8px;">Movement Clinic Physical Therapy</div>' +
-      '<div style="font-size:14px;color:#93c5fd;">Monthly Evaluation Results — ' + monthNames[month] + ' ' + year + '</div>' +
-      '</div>' +
-      '<div style="padding:32px;">' +
-      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#94a3b8;margin-bottom:16px;">Summary Statistics</div>' +
-      '<table style="width:100%;border-collapse:collapse;margin-bottom:32px;"><tr>' +
-      statCard(totalEvals, 'Total Evals', '#2563eb') +
-      statCard(totalConverted + ' (' + convRate + '%)', 'Converted', '#10b981') +
-      statCard(totalPending, 'Pending', '#f59e0b') +
-      statCard(totalLost, 'Lost', '#ef4444') +
-      '</tr></table>' +
-      '<div style="font-size:16px;font-weight:700;color:#1e293b;margin-bottom:16px;">Performance by Physical Therapist</div>' +
-      ptRowsHtml +
-      '<div style="margin-top:28px;background:#f8fafc;border-radius:8px;padding:20px;">' +
-      '<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#94a3b8;margin-bottom:12px;">Top Objections Analysis</div>' +
-      (objectionRowsHtml
-        ? '<table style="width:100%;border-collapse:collapse;">' + objectionRowsHtml + '</table>'
-        : '<div style="font-size:13px;color:#94a3b8;font-style:italic;">No lost evaluations to analyze this period.</div>') +
-      '</div>' +
-      '<div style="margin-top:24px;text-align:center;font-size:11px;color:#94a3b8;">Generated by Movement Clinic Claude AI &nbsp;&bull;&nbsp; ' + monthNames[month] + ' ' + year + '</div>' +
-      '</div></div></body></html>';
-
-    await axios.post('https://api.resend.com/emails', {
-      from: FROM_EMAIL,
-      to: [JORDAN_EMAIL],
-      subject: 'Monthly Eval Report — ' + monthNames[month] + ' ' + year + ' (' + totalEvals + ' evals, ' + convRate + '% conversion)',
-      html: monthlyHtml
-    }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
-
-    console.log('Monthly summary email sent for ' + monthNames[month] + ' ' + year);
-    await sendSlackError('✅ Monthly Metrics Updated', monthNames[month] + ' ' + year + ' — ' + totalEvals + ' evals, ' + convRate + '% conversion. Sheet updated and email sent.');
-  } catch (err) {
-    const errMsg = err.message || String(err);
-    console.error('Monthly metrics update failed:', errMsg);
-    await sendSlackError('Monthly Metrics Update Failed', errMsg);
-  }
-}
-
-function scheduleMonthlyMetricsUpdate() {
-  const now = new Date();
-  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-  // Next 1st of month at 8am PT
-  const target = new Date(pst.getFullYear(), pst.getMonth() + 1, 1, 8, 0, 0, 0);
-  if (pst >= target) target.setMonth(target.getMonth() + 1);
-  const msUntil = target - pst;
-  console.log('Monthly metrics update scheduled in ' + Math.round(msUntil / 60000) + ' minutes (1st of month 8am PT)');
-  setTimeout(async () => {
-    await updateClinicMetricsSheet();
-    setInterval(updateClinicMetricsSheet, 30 * 24 * 60 * 60 * 1000);
-  }, msUntil);
-}
-
-// Schedule weekly eval digest every Thursday at 8am PT
-function scheduleWeeklyEvalDigest() {
-  const now = new Date();
-  const pst = new Date(now.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-  const target = new Date(pst);
-  // Find next Thursday (day 4)
-  const daysUntilThursday = (4 - pst.getDay() + 7) % 7 || 7;
-  target.setDate(pst.getDate() + daysUntilThursday);
-  target.setHours(8, 0, 0, 0);
-  const msUntil = target - pst;
-  console.log('Weekly eval digest scheduled in ' + Math.round(msUntil / 60000) + ' minutes (Thursday 8am PT)');
-  setTimeout(async () => {
-    await sendWeeklyEvalDigest();
-    setInterval(sendWeeklyEvalDigest, 7 * 24 * 60 * 60 * 1000);
-  }, msUntil);
-}
-
-async function sendWeeklyEvalDigest() {
-  try {
-    const csvUrl = 'https://docs.google.com/spreadsheets/d/' + EVAL_SHEET_ID + '/export?format=csv&gid=1955906194';
-    const csvResponse = await axios.get(csvUrl);
-    const lines = csvResponse.data.split('\n').filter(l => l.trim());
-    if (lines.length < 2) {
-      console.log('No eval data for weekly digest');
-      return;
-    }
-
-    const headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim());
-    const rows = lines.slice(1).map(line => {
-      const cols = line.split(',').map(c => c.replace(/"/g, '').trim());
-      const row = {};
-      headers.forEach((h, i) => { row[h] = cols[i] || ''; });
-      return row;
-    });
-
-    // Filter to last 7 days
-    const oneWeekAgo = new Date();
-    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-    const weekRows = rows.filter(r => {
-      if (!r.evaluation_date) return true; // include rows with no date
-      const d = new Date(r.evaluation_date);
-      if (isNaN(d.getTime())) return true; // include rows with unparseable dates
-      return d >= oneWeekAgo;
-    });
-    console.log('Weekly digest: total rows in sheet:', rows.length, '— rows in last 7 days:', weekRows.length);
-
-    if (weekRows.length === 0) {
-      console.log('No evals in last 7 days for weekly digest');
-      return;
-    }
-
-    const total = weekRows.length;
-    const converted = weekRows.filter(r => r.outcome === 'Converted').length;
-    const pending = weekRows.filter(r => r.outcome === 'Pending').length;
-    const lost = weekRows.filter(r => r.outcome === 'Lost').length;
-    const conversionRate = Math.round((converted / total) * 100);
-
-    const digestPrompt = 'You are writing a weekly evaluation results report for Movement Clinic Physical Therapy. Write a clean HTML email summarizing this weeks evaluation data.\n\nDATA:\nTotal Evals: ' + total + '\nConverted: ' + converted + ' (' + conversionRate + '%)\nPending: ' + pending + '\nLost: ' + lost + '\n\nEval Details:\n' + weekRows.map(r => '- ' + (r.first_name || '') + ' ' + (r.last_name || '') + ' | PT: ' + (r.evaluating_pt || '') + ' | Outcome: ' + (r.outcome || '') + (r.objection_category ? ' | Objection: ' + r.objection_category : '')).join('\n') + '\n\nWrite a professional HTML email with inline styles, Montserrat font, max 600px. Include: header with week dates, summary stats section, conversion rate, breakdown by PT, top objections from lost evals. Return ONLY the HTML string.';
-
-    const aiResponse = await axios.post(
-      'https://api.anthropic.com/v1/messages',
-      { model: 'claude-haiku-4-5-20251001', max_tokens: 3000, messages: [{ role: 'user', content: digestPrompt }] },
-      { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
-    );
-    const digestHtml = aiResponse.data.content[0].text.replace(/\`\`\`html|\`\`\`/g, '').trim();
-
-    const weekLabel = new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles', month: 'long', day: 'numeric', year: 'numeric' });
-    await axios.post('https://api.resend.com/emails', {
-      from: FROM_EMAIL,
-      to: [JORDAN_EMAIL],
-      subject: 'Weekly Eval Report — Week of ' + weekLabel + ' (' + total + ' evals, ' + conversionRate + '% conversion)',
-      html: digestHtml
-    }, { headers: { 'Authorization': 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' } });
-
-    console.log('Weekly eval digest sent — ' + total + ' evals, ' + conversionRate + '% conversion');
-  } catch (err) {
-    console.error('Weekly eval digest failed:', err.response?.data || err.message);
-    await sendSlackError('Weekly Eval Digest Failed', err.message);
-  }
-}
-
-scheduleWeeklyEvalDigest();
-scheduleMonthlyMetricsUpdate();
-
-// Keep GHL webhook for sheet logger and other non-email uses
 async function fireGHLSummaryWebhook(summaryData) {
   if (!GHL_SUMMARY_WEBHOOK) return;
   try {
@@ -1109,7 +468,10 @@ async function fireGHLSummaryWebhook(summaryData) {
       else if (typeof val === 'object') sanitized[key] = JSON.stringify(val);
       else sanitized[key] = String(val).replace(/\n/g, ' ').replace(/\r/g, '');
     }
-    await axios.post(GHL_SUMMARY_WEBHOOK, sanitized, { headers: { 'Content-Type': 'application/json' } });
+    await axios.post(GHL_SUMMARY_WEBHOOK, sanitized, {
+      headers: { 'Content-Type': 'application/json' }
+    });
+    console.log('Summary webhook fired to GHL successfully');
   } catch (err) {
     console.error('Failed to fire GHL summary webhook:', err.message);
   }
@@ -1168,56 +530,43 @@ Return ONLY valid JSON:
 }
 
 async function generateEvalEmailContent(params) {
-  const { contactName, contactPhone, evaluatingPT, planOfCarePT, outcome, stage, paymentMethod, problemSummary, treatmentPlan, evaluationSummary, nextSteps, redFlags, calendarCreated, continuityCreated, checkinScheduled, objectionCategory, objectionDetail, physicianName, physicianOffice, coachingNotes } = params;
+  const { contactName, contactPhone, evaluatingPT, planOfCarePT, outcome, stage, paymentMethod, evaluationSummary, nextSteps, redFlags, calendarCreated, continuityCreated, rehabEssentials, checkinScheduled, objectionCategory, objectionDetail, physicianName, physicianOffice, coachingNotes } = params;
 
-  const prompt = `Write one HTML summary email for Jordan McCormack at Movement Clinic Physical Therapy.
+  const prompt = `You are writing post-evaluation summary emails for Movement Clinic Physical Therapy. Based on the data below, write two HTML emails and a Slack message.
 
-DATA:
-Patient: ${contactName} | ${contactPhone}
-Outcome: ${outcome}${stage ? ' \u2014 ' + stage : ''}
-Evaluating PT: ${evaluatingPT} | Plan of Care PT: ${planOfCarePT}
-Payment: ${paymentMethod || 'Unclear from transcript'}
-Next Steps: ${nextSteps || 'None established'}
-Objection: ${objectionCategory ? objectionCategory + (objectionDetail ? ' \u2014 ' + objectionDetail : '') : 'None'}
-Calendar Appointment Created: ${calendarCreated || 'No'}
-Continuity Pipeline Card: ${continuityCreated || 'No'}
-Check-In Text Scheduled: ${checkinScheduled || 'No'}
-Physician: ${physicianName ? physicianName + (physicianOffice ? ' \u2014 ' + physicianOffice : '') : 'None mentioned'}
-Red Flags: ${redFlags || 'None identified'}
-Problem Summary: ${problemSummary || 'Not available'}
-Treatment Plan: ${treatmentPlan || 'Not available'}
-Coaching Notes: ${coachingNotes || 'None'}
+EVALUATION DATA:
+- Patient: ${contactName} | ${contactPhone}
+- Outcome: ${outcome}${stage ? ' — ' + stage : ''}
+- Evaluating PT: ${evaluatingPT}
+- Plan of Care PT: ${planOfCarePT}
+- Payment Method: ${paymentMethod || 'Unclear from transcript'}
+- Evaluation Summary: ${evaluationSummary || 'Not available'}
+- Next Steps: ${nextSteps || 'Not established'}
+- Objection: ${objectionCategory ? objectionCategory + ' — ' + (objectionDetail || '') : 'None'}
+- Calendar Appointment Created: ${calendarCreated || 'No'}
+- Continuity Pipeline Card Created: ${continuityCreated || 'No'}
+- Rehab Essentials Enrolled: ${rehabEssentials || 'No'}
+- Check-In Text Scheduled: ${checkinScheduled || 'No'}
+- Physician: ${physicianName ? physicianName + (physicianOffice ? ' — ' + physicianOffice : '') : 'None mentioned'}
+- Red Flags: ${redFlags || 'None identified'}
+- Coaching Notes (Jordan only): ${coachingNotes || 'None'}
 
-BUILD THIS EXACT EMAIL STRUCTURE using inline styles, max-width 600px, font-family: Segoe UI, Arial, sans-serif:
+Write THREE things:
 
-1. HEADER BLOCK - left border 4px solid #2563eb, background #eaf4ff, padding 16px 20px:
-   Bold "Evaluation Complete" in #1e3a5f at 18px. Below it: "Patient: [name] ([phone]) | Outcome: [outcome] | PT: [evaluatingPT]" in 14px.
+1. TEAM EMAIL (no coaching notes) — HTML with inline styles, Montserrat font, max 600px:
+   - Outcome banner (blue left border)
+   - EVALUATION SUMMARY section
+   - NEXT STEPS section
+   - GHL ACTIONS TAKEN section: table with Payment Method, Calendar Appointment, Continuity Pipeline, Rehab Essentials, Check-In Text, Objection if applicable, Physician if applicable
+   - RED FLAGS box (amber left border, always show)
 
-2. EVALUATION SUMMARY - bold uppercase heading. Rich prose paragraphs:
-   - What brought the patient in, symptoms and history (from Problem Summary)
-   - What was assessed and identified
-   - What was recommended (from Treatment Plan)
-   Write as clinical narrative, 2-4 paragraphs, not bullet points.
+2. JORDAN EMAIL (includes coaching notes) — same as team email but add:
+   - COACHING NOTES section at bottom (indigo left border)
 
-3. NEXT STEPS - bold uppercase heading. Bullet list of agreed next steps.
+3. SLACK MESSAGE — 3-5 lines plain text: patient name, outcome, key action, red flag if any
 
-4. GHL ACTIONS TAKEN - bold uppercase heading. Table rows with 1px #f0f0f0 bottom border, padding 9px 0:
-   Payment Method | [value]
-   Calendar Appointment | [value]
-   Continuity Pipeline Card | [value]
-   Check-In Text Scheduled | [value]
-   Objection | [value or None]
-   Physician | [value or None]
-   Left cell: bold, 45% width. Right cell: normal weight.
-
-5. RED FLAGS - left border 4px solid #f59e0b, background #fffbeb, padding 14px 16px:
-   "Flag RED FLAGS" bold in #92400e. Then the red flags text below. Always show even if none.
-
-6. COACHING NOTES - left border 4px solid #6366f1, background #eef2ff, padding 14px 16px:
-   "Bulb COACHING NOTES" bold in #3730a3. Each point: bold label in #3730a3 + colon + regular explanation. Blank line between points.
-
-Return ONLY valid JSON with no markdown or preamble:
-{"jordan_email_html": "complete HTML string"}`;
+Return ONLY valid JSON:
+{"team_email_html": "complete HTML", "jordan_email_html": "complete HTML with coaching", "slack_message": "plain text"}`;
 
   const response = await axios.post(
     'https://api.anthropic.com/v1/messages',
@@ -1226,12 +575,7 @@ Return ONLY valid JSON with no markdown or preamble:
   );
   const text = response.data.content[0].text;
   const cleaned = text.replace(/```json|```/g, '').trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch (parseErr) {
-    console.error('generateEvalEmailContent JSON parse failed. Raw response (first 500 chars):', cleaned.substring(0, 500));
-    throw new Error('Email generation returned invalid JSON: ' + parseErr.message);
-  }
+  return JSON.parse(cleaned);
 }
 
 function getTimestamp() {
@@ -1262,24 +606,13 @@ app.post('/webhook', async (req, res) => {
       return res.status(200).json({ message: 'Empty transcript, skipping' });
     }
 
-    // Respond immediately to prevent Quo from retrying due to timeout
-    res.status(200).json({ message: 'Received — processing in background' });
-
-    // Process asynchronously after responding
-    setImmediate(async () => {
-    try {
-
     console.log(`Processing call ${callId}, transcript length: ${transcript.length}`);
 
-    // Get call details and contact FIRST — before pre-screen
     let contactPhone = null;
-    let extractedTeamMember = null;
     try {
       const callDetails = await getCallDetails(callId);
       contactPhone = extractContactPhone(callDetails);
       console.log(`Contact phone: ${contactPhone}`);
-      extractedTeamMember = extractTeamMember(callDetails);
-      console.log('Team member from Quo:', extractedTeamMember || 'Not identified');
     } catch (err) {
       console.error('Failed to fetch call details:', err.message);
     }
@@ -1295,61 +628,6 @@ app.post('/webhook', async (req, res) => {
       }
     }
 
-    // Check if this contact already has an existing lead opportunity
-    // If yes — skip pre-screen entirely, always process as lead (outbound calls to existing leads)
-    let hasExistingLeadOpp = false;
-    if (contact) {
-      try {
-        const existingOpps = await getAllContactOpportunities(contact.id);
-        hasExistingLeadOpp = !!findLeadOpportunity(existingOpps);
-      } catch (err) {
-        console.error('Failed to check existing opportunities:', err.message);
-      }
-    }
-
-    // PRE-SCREEN: Only run for new/unknown contacts
-    let isNonLeadCall = false;
-    if (hasExistingLeadOpp) {
-      console.log('Existing lead opportunity found — bypassing pre-screen, processing as lead');
-    } else {
-      try {
-        const preScreenResponse = await axios.post(
-          'https://api.anthropic.com/v1/messages',
-          {
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 100,
-            messages: [{
-              role: 'user',
-              content: `You are a call classifier for a physical therapy clinic. Read this transcript and respond with ONLY one of these three words:
-
-- "LEAD" — caller is a potential patient interested in PT, evaluations, or assessments
-- "REFERRAL" — caller is a physician office coordinating patient care, a gym or fitness studio exploring collaboration, or another healthcare provider with a professional relationship purpose
-- "SKIP" — caller is a vendor, sales rep, job applicant, insurance company, law office, or anyone with no relevant relationship to the clinic
-
-TRANSCRIPT:
-${transcript}
-
-Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
-            }]
-          },
-          { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
-        );
-        const preScreenResult = preScreenResponse.data.content[0].text.trim().toUpperCase();
-        if (preScreenResult === 'SKIP') {
-          console.log('Pre-screen: Vendor/sales/interview call — skipping entirely, no contact created');
-          return;
-        } else if (preScreenResult === 'REFERRAL') {
-          isNonLeadCall = true;
-          console.log('Pre-screen: Referral source call — contact will be created, no pipeline actions');
-        } else {
-          console.log('Pre-screen: Lead call confirmed — full processing');
-        }
-      } catch (err) {
-        console.error('Pre-screen failed, proceeding with full analysis:', err.message);
-      }
-    }
-
-    // Create contact if not found yet (only for leads and referrals that passed pre-screen)
     if (!contact) {
       try {
         const result = await createOrFindGHLContact(contactPhone || '+10000000000', 'Incoming Call No Name Provided');
@@ -1364,12 +642,6 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
     const isPlaceholderName = !contact.firstName || contact.firstName === 'Incoming Call' || contact.firstName === 'Unknown';
     const contactName = `${contact.firstName || ''} ${contact.lastName || ''}`.trim();
     console.log(`Contact: ${contactName} (${contact.id})`);
-
-    // If non-lead call — contact is saved but no pipeline/opportunity actions
-    if (isNonLeadCall) {
-      console.log('Non-lead call — contact saved, no pipeline or opportunity actions taken');
-      return;
-    }
 
     // Find existing lead opportunity - prevents duplicates across lead pipelines
     let allOpps = [];
@@ -1399,45 +671,14 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
 
     console.log(`Claude decision: ${claudeResult.outcome}`);
 
-    // Handle non-lead and records request calls immediately
-    if (claudeResult.outcome === 'NON_LEAD_CALL') {
-      console.log('Non-lead call detected — no action taken, skipping silently');
-      return;
-    }
-
-    if (claudeResult.outcome === 'RECORDS_REQUEST') {
-      console.log('Records request detected — adding note and task');
-      if (contact) {
-        const recordsNote = 'Claude AI Assistant:\n\n' + getTimestamp() + '\n\nPatient called requesting copies of their records. Task created for admin team to follow up.';
-        await addNoteToContact(contact.id, recordsNote);
-        const taskDue = new Date();
-        taskDue.setDate(taskDue.getDate() + 1);
-        const patientFirst = (finalContactName || 'Unknown').split(' ')[0];
-        const patientLast = (finalContactName || 'Unknown').split(' ').slice(1).join(' ') || '';
-        await createGHLTask(
-          contact.id,
-          patientFirst + ' ' + patientLast + ' is Requesting Records',
-          taskDue,
-          'Please email them their records as they requested.'
-        );
-        console.log('Records request note and task created');
-      } else {
-        console.log('Records request but no GHL contact found — skipping');
-      }
-      return;
-    }
-
     // Update contact name if extracted from transcript
     let finalContactName = contactName;
-    if (claudeResult.extracted_name) {
+    if (claudeResult.extracted_name && isPlaceholderName) {
       const nameParts = claudeResult.extracted_name.trim().split(' ');
       try {
         await updateGHLContactName(contact.id, nameParts[0], nameParts.slice(1).join(' ') || '');
         finalContactName = claudeResult.extracted_name;
         console.log(`Updated contact name to: ${finalContactName}`);
-        if (activeOpportunity) {
-          await updateGHLOpportunityName(activeOpportunity.id, capitalizeFullName(finalContactName));
-        }
       } catch (err) {
         console.error('Failed to update contact name:', err.message);
       }
@@ -1508,7 +749,7 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       try {
         activeOpportunity = await createGHLOpportunity(
           contact.id, defaultPipelineId, defaultStageId,
-          capitalizeFullName(finalContactName) || 'Incoming Call No Name Provided'
+          finalContactName || 'Incoming Call No Name Provided'
         );
         console.log('Created new lead opportunity: ' + activeOpportunity.id);
       } catch (err) {
@@ -1587,240 +828,47 @@ Respond with ONLY one word: LEAD, REFERRAL, or SKIP.`
       pipelineStageInfo = 'Pipeline: ' + (PIPELINE_NAMES[finalPipelineId] || finalPipelineId) + ' | Stage: ' + (STAGE_NAMES[previousStageId] || 'Unknown') + ' (no change)';
     }
 
-    // Send real-time Slack notification and log for daily digest
-    const previousStageName = STAGE_NAMES[previousStageId] || (opportunity ? opportunity.pipelineStageName : null) || previousStageId || 'Unknown';
-    const newStageName = STAGE_NAMES[finalStageId] || finalStageId || (opportunity ? opportunity.pipelineStageName : null) || 'Unknown';
-    const stageDisplay = isNewOpportunity
-      ? 'No previous stage (new opportunity) → ' + newStageName
-      : stageChanged
-        ? previousStageName + ' → ' + newStageName
-        : newStageName + ' (no change)';
-
-    // Build plain language outcome for Slack
-    let slackOutcome = claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details';
-    if (claudeResult.follow_up_date) {
-      slackOutcome += ' — Follow-up: ' + claudeResult.follow_up_date + (claudeResult.follow_up_time ? ' @ ' + claudeResult.follow_up_time : '');
-    }
-
-    const confidenceScore = parseInt(claudeResult.confidence_score) || 0;
-    const confidenceReason = claudeResult.confidence_reason || '';
-    const isLowConfidence = confidenceScore < 70;
-    const madeGHLChanges = stageChanged || isNewOpportunity;
-
-    // Add low confidence note if applicable
-    if (isLowConfidence) {
-      noteLines.push('');
-      noteLines.push('⚠️ Low Confidence in Transcript Interpretation (' + confidenceScore + '%) — ' + confidenceReason);
-    }
-
-    // Create low confidence task if GHL changes were made
-    if (isLowConfidence && madeGHLChanges && contact) {
-      try {
-        const taskDueDate = new Date();
-        taskDueDate.setDate(taskDueDate.getDate() + 1);
-        const lowConfidenceNote = 'Pipeline: ' + (PIPELINE_NAMES[finalPipelineId] || finalPipelineId) +
-          '\nCurrent Stage: ' + (STAGE_NAMES[finalStageId] || finalStageId || 'Unknown') +
-          '\nChanges Made: ' + (isNewOpportunity ? 'New opportunity created' : 'Stage updated from ' + (STAGE_NAMES[previousStageId] || 'Unknown') + ' to ' + (STAGE_NAMES[finalStageId] || 'Unknown')) +
-          '\nConfidence Score: ' + confidenceScore + '%' +
-          '\nReason: ' + confidenceReason +
-          '\nPlease verify these changes are correct in GHL.';
-        const firstName = (finalContactName || 'Unknown').split(' ')[0];
-        const lastName = (finalContactName || 'Unknown').split(' ').slice(1).join(' ') || '';
-        await createGHLTask(
-          contact.id,
-          'Low Confidence in Transcript — ' + firstName + ' ' + lastName,
-          taskDueDate,
-          lowConfidenceNote
-        );
-        console.log('Low confidence task created');
-      } catch (err) {
-        console.error('Failed to create low confidence task:', err.message);
-      }
-    }
-
-    // Create eval cancellation review task if patient explicitly cancelled their eval
-    if (claudeResult.eval_cancelled === true && contact) {
-      try {
-        const cancelDueDate = new Date();
-        cancelDueDate.setDate(cancelDueDate.getDate() + 1);
-        const cancelNote = 'Patient explicitly stated they want to cancel their upcoming evaluation.\n' +
-          'Pipeline: ' + (PIPELINE_NAMES[finalPipelineId] || finalPipelineId) + '\n' +
-          'Current Stage: Eval Scheduled\n' +
-          'Action Required: Manually review and update the opportunity card in GHL based on whether they want to reschedule or fully cancel.\n' +
-          'Call Summary: ' + (claudeResult.note || '');
-        await createGHLTask(
-          contact.id,
-          'Eval Cancellation Request — ' + (finalContactName || 'Unknown'),
-          cancelDueDate,
-          cancelNote
-        );
-        console.log('Eval cancellation task created');
-      } catch (err) {
-        console.error('Failed to create eval cancellation task:', err.message);
-      }
-    }
-
-    const ghlUrl = activeOpportunity
-      ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + activeOpportunity.id
-      : null;
-
-    const callBlocks = buildCallSlackBlocks({
-      contactName: finalContactName || 'Unknown',
-      contactPhone: contactPhone || 'Unknown',
-      callTime: getTimestamp(),
-      teamMember: extractedTeamMember || claudeResult.team_member || 'Not identified',
-      outcome: slackOutcome,
-      pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
-      stageDisplay,
-      redFlags: claudeResult.red_flags_detail || claudeResult.disqualifier_reason || 'None',
-      clinicalSummary: claudeResult.clinical_summary || null,
-      isNewOpportunity,
-      confidenceScore,
-      confidenceReason,
-      opportunityId: activeOpportunity ? activeOpportunity.id : null
-    });
-    await sendSlackMessage(callBlocks);
-
-    // Send to deals board channel if eval was scheduled
-    if (claudeResult.outcome === 'EVAL_SCHEDULED') {
-      // PT who will do the eval — from Claude's transcript analysis, filtered to valid eval PTs only
-      const VALID_EVAL_PTS = ['Chris Bostwick', 'John Gan', 'TJ Aquino', 'Jordan McCormack'];
-      const evalPtName = VALID_EVAL_PTS.includes(claudeResult.evaluating_pt) ? claudeResult.evaluating_pt
-        : VALID_EVAL_PTS.find(pt => claudeResult.plain_language_outcome && claudeResult.plain_language_outcome.includes(pt))
-        || VALID_EVAL_PTS.find(pt => claudeResult.note && claudeResult.note.includes(pt))
-        || null;
-      const evalPtSlackId = evalPtName && SLACK_USER_MAP[evalPtName] ? SLACK_USER_MAP[evalPtName] : null;
-      const evalPtDisplay = evalPtSlackId ? '<@' + evalPtSlackId + '>' : (evalPtName || 'TBD');
-
-      const patientEmail = claudeResult.extracted_email || (contact ? contact.email : null) || '';
-      const patientFirstName = finalContactName ? capitalizeFullName(finalContactName).split(' ')[0] : '';
-      const patientLastName = finalContactName ? capitalizeFullName(finalContactName).split(' ').slice(1).join(' ') : '';
-      const formUrl = RAILWAY_FORM_URL
-        ? RAILWAY_FORM_URL +
-          '?first=' + encodeURIComponent(patientFirstName) +
-          '&last=' + encodeURIComponent(patientLastName) +
-          '&phone=' + encodeURIComponent(contactPhone || '') +
-          '&email=' + encodeURIComponent(patientEmail)
-        : null;
-      console.log('Deals board form URL:', formUrl || 'RAILWAY_FORM_URL not set');
-
-      const dealMsg = {
-        fallback: 'New Eval Booked — ' + capitalizeFullName(finalContactName),
-        blocks: [
-          { type: 'header', text: { type: 'plain_text', text: '🎉 Evaluation Booked', emoji: true } },
-          { type: 'section', fields: [
-            { type: 'mrkdwn', text: '*Patient*\n' + (ghlUrl ? '<' + ghlUrl + '|' + capitalizeFullName(finalContactName) + '>' : capitalizeFullName(finalContactName)) },
-            { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') }
-          ]},
-          { type: 'section', fields: [
-            { type: 'mrkdwn', text: '*Evaluating PT*\n' + evalPtDisplay },
-            { type: 'mrkdwn', text: '*Call Time*\n' + getTimestamp() }
-          ]},
-          { type: 'section', text: { type: 'mrkdwn', text: '*Details*\n' + (claudeResult.plain_language_outcome || claudeResult.note || 'See GHL for details') } },
-          ...(claudeResult.red_flags_detail && claudeResult.red_flags_detail !== 'None' && claudeResult.red_flags_detail !== 'null'
-            ? [{ type: 'section', text: { type: 'mrkdwn', text: ':warning: *Red Flags*\n' + claudeResult.red_flags_detail } }]
-            : [])
-        ]
-      };
-
-      if (formUrl) {
-        dealMsg.blocks.push({
-          type: 'actions',
-          elements: [{
-            type: 'button',
-            text: { type: 'plain_text', text: 'Open Post-Eval Form →', emoji: true },
-            url: formUrl,
-            style: 'primary'
-          }]
-        });
-      }
-
-      try {
-        const dealPayload = { channel: SLACK_EVALS_SCHEDULED_CHANNEL_ID, text: dealMsg.fallback, blocks: dealMsg.blocks };
-        await axios.post('https://slack.com/api/chat.postMessage', dealPayload, {
-          headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' }
-        });
-        console.log('Deals board Slack message sent');
-      } catch (err) {
-        console.error('Deals board Slack failed:', err.response?.data || err.message);
-      }
-    }
-
-    // Create GHL calendar appointment for firm follow-up calls
-    if (claudeResult.follow_up_date && claudeResult.follow_up_time) {
-      const followUpPT = claudeResult.team_member && PT_CALENDARS[claudeResult.team_member]
-        ? claudeResult.team_member
-        : 'Jordan McCormack';
-      const followUpPTInfo = PT_CALENDARS[followUpPT] || PT_CALENDARS['Jordan McCormack'];
-      if (followUpPTInfo && contact) {
-        await createGHLCalendarAppointment(
-          contact.id,
-          followUpPTInfo.calendarId,
-          followUpPTInfo.ghlUserId,
-          finalContactName || 'Unknown',
-          followUpPT.split(' ')[0],
-          claudeResult.follow_up_date,
-          claudeResult.follow_up_time
-        );
-        console.log('Follow-up calendar appointment created for ' + followUpPT);
-      }
-    }
-
-    await logEventToRedis({
-      type: 'Call',
-      contact: (finalContactName || 'Unknown') + ' ' + (contactPhone || ''),
-      summary: (claudeResult.outcome || 'Unknown') + ' — ' + (PIPELINE_NAMES[finalPipelineId] || '') + (stageChanged ? ' — Stage: ' + (STAGE_NAMES[previousStageId] || '') + ' to ' + (STAGE_NAMES[finalStageId] || '') : '')
-    });
-
-    // Fire call activity log to Google Sheet via GHL workflow
+    // Generate Claude-written email and Slack message — no variable mapping needed
     try {
-      await axios.post(CALL_ACTIVITY_WEBHOOK, {
-        timestamp: getTimestamp(),
-        contact_name: String(capitalizeFullName(finalContactName) || 'Unknown'),
-        contact_phone: String(contactPhone || 'Unknown'),
-        team_member: String(extractedTeamMember || claudeResult.team_member || 'Not identified'),
-        outcome: String(claudeResult.plain_language_outcome || claudeResult.note || ''),
-        pipeline: String(PIPELINE_NAMES[finalPipelineId] || finalPipelineId || ''),
-        previous_stage: String(previousStageName || 'No previous stage'),
-        new_stage: String(newStageName || ''),
-        confidence_score: String(confidenceScore || '') + '%',
-        red_flags: String(claudeResult.red_flags_detail || claudeResult.disqualifier_reason || 'None'),
-        call_summary: String(claudeResult.note || '')
-      }, { headers: { 'Content-Type': 'application/json' } });
-      console.log('Call activity log fired to sheet');
-    } catch (err) {
-      console.error('Call activity log failed:', err.message);
-    }
-
-    // Fire call activity log to Google Sheet via GHL webhook
-    try {
-      await axios.post(GHL_CALL_LOG_WEBHOOK, {
-        timestamp: getTimestamp(),
-        contact_name: String(capitalizeFullName(finalContactName) || 'Unknown'),
-        contact_phone: String(contactPhone || 'Unknown'),
-        team_member: String(extractedTeamMember || claudeResult.team_member || 'Not identified'),
-        outcome: String(claudeResult.plain_language_outcome || claudeResult.note || 'Unknown'),
-        pipeline: String(PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown'),
-        previous_stage: String(previousStageName || 'No previous stage'),
-        new_stage: String(newStageName || 'Unknown'),
-        confidence_score: String(confidenceScore || 0) + '%',
-        red_flags: String(claudeResult.red_flags_detail || claudeResult.disqualifier_reason || 'None'),
-        call_summary: String(claudeResult.note || '')
-      }, { headers: { 'Content-Type': 'application/json' } });
-      console.log('Call activity log fired to Google Sheet');
-    } catch (err) {
-      console.error('Call log webhook failed:', err.message);
+      const emailContent = await generateCallEmailContent({
+        contactName: finalContactName || 'Unknown',
+        contactPhone: contactPhone || 'Unknown',
+        outcome: claudeResult.outcome || '',
+        note: claudeResult.note || '',
+        pipelineName: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || '',
+        previousStage: STAGE_NAMES[previousStageId] || 'Unknown',
+        newStage: STAGE_NAMES[finalStageId] || finalStageId || '',
+        stageChanged,
+        opportunityValue: claudeResult.opportunity_value ? '$' + claudeResult.opportunity_value : null,
+        disqualifierReason: claudeResult.disqualifier_reason || null,
+        isNewContact,
+        isNewOpportunity,
+        taskCreated,
+        followUpDays: claudeResult.follow_up_days || null,
+        nameExtracted: claudeResult.extracted_name || null
+      });
+      await fireGHLSummaryWebhook({
+        email_body: emailContent.email_html || '',
+        slack_message: emailContent.slack_message || '',
+        contact_name: String(finalContactName || 'Unknown'),
+        contact_id: String(contact.id || '')
+      });
+    } catch (emailErr) {
+      console.error('Failed to generate email content — full error:', JSON.stringify(emailErr.message || emailErr.response?.data || emailErr));
+      await fireGHLSummaryWebhook({
+        email_body: '<p>Call processed. Outcome: ' + (claudeResult.outcome || 'Unknown') + '. Contact: ' + (finalContactName || 'Unknown') + '.</p>',
+        slack_message: 'Call processed for ' + (finalContactName || 'Unknown') + '. Outcome: ' + (claudeResult.outcome || 'Unknown'),
+        contact_name: String(finalContactName || 'Unknown'),
+        contact_id: String(contact.id || '')
+      });
     }
 
     console.log(`Successfully processed call ${callId}: ${claudeResult.outcome}`);
+    res.status(200).json({ success: true, outcome: claudeResult.outcome });
 
-    } catch (error) {
-      console.error('Error processing webhook:', error.response?.data || error.message);
-    }
-    }); // end setImmediate
-
-  } catch (outerError) {
-    console.error('Webhook outer error:', outerError.message);
+  } catch (error) {
+    console.error('Error processing webhook:', error.response?.data || error.message);
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -2003,320 +1051,7 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Manual digest trigger for testing
-app.get('/trigger-digest', async (req, res) => {
-  console.log('Manual digest trigger fired');
-  res.status(200).json({ message: 'Digest triggered — check your email in ~30 seconds' });
-  await sendDailyDigest();
-});
-
 const PORT = process.env.PORT || 3000;
-app.get('/test-monthly-metrics', async (req, res) => {
-  res.status(200).json({ message: 'Monthly metrics update triggered — check Slack and Google Sheet in ~30 seconds' });
-  setImmediate(async () => {
-    try {
-      await updateClinicMetricsSheet();
-    } catch (err) {
-      console.error('Test monthly metrics failed:', err.message);
-    }
-  });
-});
-
-app.get('/test-daily-digest', async (req, res) => {
-  res.status(200).json({ message: 'Daily digest triggered — check jordan@ inbox in ~30 seconds' });
-  setImmediate(async () => {
-    try { await sendDailyDigest(); } catch (err) { console.error('Test daily digest failed:', err.message); }
-  });
-});
-
-app.get('/test-weekly-digest', async (req, res) => {
-  res.status(200).json({ message: 'Weekly eval digest triggered — check jordan@ inbox in ~30 seconds' });
-  setImmediate(async () => {
-    try {
-      await sendWeeklyEvalDigest();
-    } catch (err) {
-      console.error('Test digest failed:', err.message);
-    }
-  });
-});
-
-// ─── BRIEFING ROUTES ──────────────────────────────────────────────────────────
-
-// Called by daily briefing script each morning to save today's briefing
-app.post('/save-briefing', (req, res) => {
-  const pin = req.headers['x-briefing-pin'];
-  if (pin !== BRIEFING_PIN) return res.status(401).json({ error: 'Unauthorized' });
-  latestBriefing = req.body;
-  console.log(`📋 Briefing saved — ${new Date().toISOString()}`);
-  res.json({ success: true });
-});
-
-// Mark a Notion task as done
-app.post('/mark-done', async (req, res) => {
-  const pin = req.headers['x-briefing-pin'] || req.body.pin;
-  if (pin !== BRIEFING_PIN) return res.status(401).json({ error: 'Unauthorized' });
-  const { notionId } = req.body;
-  if (!notionId) return res.status(400).json({ error: 'notionId required' });
-  try {
-    const notion = new NotionClient({ auth: process.env.NOTION_TOKEN });
-    await notion.pages.update({
-      page_id: notionId,
-      properties: { Done: { checkbox: true } },
-    });
-    console.log(`✅ Notion task marked done: ${notionId}`);
-    res.json({ success: true });
-  } catch (err) {
-    console.error('Mark done failed:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Landing page — PIN protected dashboard
-app.get('/briefing', (req, res) => {
-  const pin = req.query.pin;
-  const WEBHOOK_URL = process.env.WEBHOOK_SERVER_URL || ('https://' + (process.env.RAILWAY_STATIC_URL || 'localhost:3000'));
-
-  if (pin !== BRIEFING_PIN) {
-    return res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Daily Briefing</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0;}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f4f4f4;display:flex;align-items:center;justify-content:center;min-height:100vh;}
-    .card{background:white;border-radius:12px;padding:40px;max-width:360px;width:100%;box-shadow:0 4px 20px rgba(0,0,0,0.08);text-align:center;}
-    h1{font-size:22px;margin-bottom:8px;}
-    p{color:#666;font-size:14px;margin-bottom:24px;}
-    input{width:100%;padding:12px 16px;border:1px solid #ddd;border-radius:8px;font-size:20px;text-align:center;letter-spacing:8px;margin-bottom:16px;}
-    button{width:100%;padding:12px;background:#1a1a1a;color:white;border:none;border-radius:8px;font-size:15px;font-weight:600;cursor:pointer;}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Daily Briefing</h1>
-    <p>Enter your PIN to continue</p>
-    <input type="password" id="pin" maxlength="6" placeholder="••••" autofocus>
-    <button onclick="go()">View Briefing</button>
-  </div>
-  <script>
-    function go(){window.location.href='/briefing?pin='+document.getElementById('pin').value;}
-    document.getElementById('pin').addEventListener('keydown',e=>{if(e.key==='Enter')go();});
-  </script>
-</body>
-</html>`);
-  }
-
-  if (!latestBriefing) {
-    return res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Daily Briefing</title>
-<style>body{font-family:-apple-system,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;background:#f4f4f4;}
-.card{background:white;border-radius:12px;padding:40px;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,0.08);}
-h1{font-size:20px;margin-bottom:8px;}p{color:#888;font-size:14px;}</style></head>
-<body><div class="card"><h1>No briefing yet</h1><p>Today's briefing hasn't run yet. Check back after 7am.</p></div></body></html>`);
-  }
-
-  const { analysis, draftLinks, taskCounts, emailCount, date } = latestBriefing;
-  const briefingDate = new Date(date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
-  const PIN = BRIEFING_PIN;
-
-  const recurringTag = flag => flag ? `<span class="tag recurring">${flag}</span>` : '';
-
-  const priorityCards = (analysis.priority_actions_today || []).map(item => `
-    <div class="card-item urgent">
-      <div class="card-type">${item.type.toUpperCase()}</div>
-      <div class="card-title">${item.title}</div>
-      <div class="card-meta">${item.why}</div>
-      <div class="card-meta"><strong>Action:</strong> ${item.suggested_action}</div>
-      ${recurringTag(item.recurring_flag)}
-      <a class="btn btn-dark" href="${item.url}" target="_blank">Open ${item.type === 'email' ? 'in Gmail' : 'in Notion'} →</a>
-    </div>`).join('') || '<p class="empty">Nothing urgent today.</p>';
-
-  const emailCards = (analysis.emails_needing_response || []).map(item => {
-    const draft = draftLinks?.[item.message_id];
-    let draftHtml = '';
-    if (draft?.type === 'single') {
-      draftHtml = `<a class="btn btn-draft" href="${draft.url}" target="_blank">✏️ Open Draft</a>`;
-    } else if (draft?.type === 'ambiguous') {
-      draftHtml = `<div class="draft-row">
-        ${draft.urlYes ? `<a class="btn btn-yes" href="${draft.urlYes}" target="_blank">✓ ${draft.labelYes}</a>` : ''}
-        ${draft.urlNo ? `<a class="btn btn-no" href="${draft.urlNo}" target="_blank">✗ ${draft.labelNo}</a>` : ''}
-      </div>`;
-    }
-    return `
-    <div class="card-item">
-      <div class="card-title">${item.subject}</div>
-      <div class="card-meta">From: ${item.from}</div>
-      <div class="card-meta">${item.summary}</div>
-      <div class="card-meta"><strong>Suggested:</strong> ${item.suggested_action}</div>
-      ${recurringTag(item.recurring_flag)}
-      <div class="btn-row">
-        <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Gmail</a>
-        ${draftHtml}
-      </div>
-    </div>`;
-  }).join('') || '<p class="empty">No emails need a response.</p>';
-
-  const delegateCards = (analysis.delegate_to_admin || []).map(item => `
-    <div class="card-item delegate">
-      <div class="card-type">${item.type.toUpperCase()}</div>
-      <div class="card-title">${item.title}</div>
-      <div class="card-meta">${item.reason}</div>
-      <a class="btn btn-outline" href="${item.url}" target="_blank">Open →</a>
-    </div>`).join('') || '<p class="empty">Nothing to delegate.</p>';
-
-  const overdueCards = (analysis.overdue_items || []).map(item => `
-    <div class="card-item overdue">
-      <div class="card-title">${item.title}</div>
-      <div class="card-meta">Was due: ${item.due_date}</div>
-      ${recurringTag(item.recurring_flag)}
-      <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Notion</a>
-    </div>`).join('');
-
-  const upcomingCards = (analysis.upcoming_deadlines || []).map(item => `
-    <div class="card-item">
-      <div class="card-title">${item.title}</div>
-      <div class="card-meta">Due: ${item.due_date}</div>
-      <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Notion</a>
-    </div>`).join('');
-
-  const staleCards = (analysis.stale_tasks || []).map(item => `
-    <div class="card-item stale" id="stale-${item.notion_id}">
-      <div class="card-title">${item.title}</div>
-      <div class="card-meta">Created: ${item.created_date}</div>
-      <div class="card-meta"><strong>Recommendation:</strong> ${item.recommendation}</div>
-      <div class="btn-row">
-        <a class="btn btn-outline" href="${item.url}" target="_blank">Open in Notion</a>
-        <button class="btn btn-done" onclick="markDone('${item.notion_id}',this)">✓ Mark Done</button>
-      </div>
-    </div>`).join('');
-
-  const noActionList = (analysis.no_action_needed || []).map(s => `<div class="no-action-item">${s}</div>`).join('');
-
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Daily Briefing — ${briefingDate}</title>
-  <style>
-    *{box-sizing:border-box;margin:0;padding:0;}
-    body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#efefef;color:#1a1a1a;}
-    .header{background:#1a1a1a;color:white;padding:18px 20px;position:sticky;top:0;z-index:100;}
-    .header h1{font-size:17px;font-weight:700;}
-    .header .date{font-size:12px;color:#888;margin-top:2px;}
-    .stats{display:flex;gap:14px;margin-top:8px;flex-wrap:wrap;}
-    .stat{font-size:12px;color:#aaa;}.stat strong{color:white;}
-    .container{max-width:700px;margin:0 auto;padding:18px 14px 60px;}
-    .section{margin-bottom:22px;}
-    .section-header{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#888;padding-bottom:7px;border-bottom:1px solid #ddd;margin-bottom:10px;display:flex;align-items:center;gap:8px;}
-    .badge{background:#e0e0e0;color:#555;font-size:10px;padding:1px 7px;border-radius:10px;font-weight:700;}
-    .card-item{background:white;border-radius:8px;padding:13px 15px;margin-bottom:9px;border-left:3px solid #ddd;box-shadow:0 1px 3px rgba(0,0,0,0.06);}
-    .card-item.urgent{border-left-color:#e8612c;background:#fff8f4;}
-    .card-item.delegate{border-left-color:#2c7be8;background:#f4f8ff;}
-    .card-item.overdue{border-left-color:#e82c2c;background:#fff4f4;}
-    .card-item.stale{border-left-color:#c8a800;background:#fdfdf0;}
-    .card-type{font-size:9px;font-weight:800;text-transform:uppercase;letter-spacing:1px;color:#999;margin-bottom:3px;}
-    .card-title{font-size:14px;font-weight:600;margin-bottom:4px;}
-    .card-meta{font-size:12px;color:#666;margin-bottom:3px;line-height:1.5;}
-    .tag{display:inline-block;font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;margin:5px 0 3px;}
-    .tag.recurring{background:#fff3cd;color:#856404;}
-    .btn-row{display:flex;gap:8px;margin-top:9px;flex-wrap:wrap;align-items:center;}
-    .draft-row{display:flex;gap:8px;flex-wrap:wrap;}
-    .btn{display:inline-block;padding:6px 12px;border-radius:6px;font-size:12px;font-weight:600;text-decoration:none;cursor:pointer;border:none;font-family:inherit;}
-    .btn-dark{background:#1a1a1a;color:white;margin-top:9px;}
-    .btn-outline{background:transparent;color:#1a1a1a;border:1px solid #ccc;}
-    .btn-draft{background:#1a1a1a;color:white;}
-    .btn-yes{background:#2c7be8;color:white;}
-    .btn-no{background:#888;color:white;}
-    .btn-done{background:#27ae60;color:white;}
-    .btn-done:disabled{background:#ccc;cursor:default;}
-    .empty{font-size:13px;color:#aaa;padding:6px 0;}
-    .no-action-item{font-size:12px;color:#aaa;padding:4px 0;border-bottom:1px solid #f0f0f0;}
-    .no-action-item:last-child{border-bottom:none;}
-    .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#27ae60;color:white;padding:9px 18px;border-radius:8px;font-size:13px;font-weight:600;opacity:0;transition:opacity 0.3s;pointer-events:none;z-index:999;}
-    .toast.show{opacity:1;}
-  </style>
-</head>
-<body>
-<div class="header">
-  <h1>Daily Briefing</h1>
-  <div class="date">${briefingDate}</div>
-  <div class="stats">
-    <div class="stat"><strong>${taskCounts?.today || 0}</strong> due today</div>
-    <div class="stat"><strong>${taskCounts?.overdue || 0}</strong> overdue</div>
-    <div class="stat"><strong>${taskCounts?.upcoming || 0}</strong> this week</div>
-    <div class="stat"><strong>${emailCount || 0}</strong> unread</div>
-    <div class="stat"><strong>${analysis.emails_needing_response?.length || 0}</strong> need response</div>
-  </div>
-</div>
-<div class="container">
-
-  <div class="section">
-    <div class="section-header">🔥 Priority Actions Today <span class="badge">${analysis.priority_actions_today?.length || 0}</span></div>
-    ${priorityCards}
-  </div>
-
-  <div class="section">
-    <div class="section-header">✉️ Emails Needing Response <span class="badge">${analysis.emails_needing_response?.length || 0}</span></div>
-    ${emailCards}
-  </div>
-
-  <div class="section">
-    <div class="section-header">📋 Delegate to Admin <span class="badge">${analysis.delegate_to_admin?.length || 0}</span></div>
-    ${delegateCards}
-  </div>
-
-  ${analysis.overdue_items?.length ? `
-  <div class="section">
-    <div class="section-header">⚠️ Overdue <span class="badge">${analysis.overdue_items.length}</span></div>
-    ${overdueCards}
-  </div>` : ''}
-
-  ${analysis.upcoming_deadlines?.length ? `
-  <div class="section">
-    <div class="section-header">📅 Due This Week <span class="badge">${analysis.upcoming_deadlines.length}</span></div>
-    ${upcomingCards}
-  </div>` : ''}
-
-  ${analysis.stale_tasks?.length ? `
-  <div class="section">
-    <div class="section-header">🗂️ Stale Tasks — Review &amp; Clear <span class="badge">${analysis.stale_tasks.length}</span></div>
-    ${staleCards}
-  </div>` : ''}
-
-  ${analysis.no_action_needed?.length ? `
-  <div class="section">
-    <div class="section-header">ℹ️ No Action Needed</div>
-    ${noActionList}
-  </div>` : ''}
-
-</div>
-<div class="toast" id="toast"></div>
-<script>
-  const PIN='${PIN}';
-  const WEBHOOK='${WEBHOOK_URL}';
-  async function markDone(notionId,btn){
-    btn.disabled=true;btn.textContent='Marking...';
-    try{
-      const r=await fetch(WEBHOOK+'/mark-done',{method:'POST',headers:{'Content-Type':'application/json','x-briefing-pin':PIN},body:JSON.stringify({notionId})});
-      if(r.ok){
-        const card=document.getElementById('stale-'+notionId);
-        if(card){card.style.opacity='0.4';card.style.pointerEvents='none';}
-        btn.textContent='✓ Done';
-        toast('Marked as done in Notion');
-      } else {btn.disabled=false;btn.textContent='✓ Mark Done';toast('Failed — try again');}
-    } catch(e){btn.disabled=false;btn.textContent='✓ Mark Done';}
-  }
-  function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),3000);}
-</script>
-</body>
-</html>`);
-});
-
-// ─── END BRIEFING ROUTES ──────────────────────────────────────────────────────
-
 app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on port ${PORT}`); });
 
 // ============================================================
@@ -2343,27 +1078,6 @@ const CONTINUITY_PIPELINE_ID = 'UwFUs0w3nmj6k0f1EEXm';
 const CONTINUITY_PURCHASED_STAGE_ID = '63d7e07f-e3cc-4931-9d2e-0f67028bd2be';
 
 const GHL_SHEET_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/013d41b5-f370-4422-9353-3f7d90b21890';
-const CALL_ACTIVITY_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/98f7f9a2-46b1-482a-9fa0-fa56e28300c0';
-const CALL_ACTIVITY_SHEET_ID = '1Vllfbhf2ZkFOSCZYwW6qxeQn6B2OYEmfdi3Cl_l42Io';
-const EVAL_SHEET_ID = '1z6Y8eRaTNtiwJySGplMUaD-yJwq4M6vkQl2IzM3tJsI';
-const CLINIC_METRICS_SHEET_ID = '1ej2f-8W7pE8ydVR6TOOdP246Zmm9hU974FJL0cJJ8sE';
-
-// Map PT names to their sheet tab names
-const PT_SHEET_TABS = {
-  'clinic': 'Clinic Metrics',
-  'Jordan McCormack': 'Jordan McCormack Metrics',
-  'Chris Bostwick': 'Chris Bostwick Metrics',
-  'TJ Aquino': 'TJ Aquino Metrics',
-  'John Gan': 'John Gan Metrics'
-};
-
-// Month rows in the sheet (row 3 = Jan, row 4 = Feb, etc. based on header rows)
-const MONTH_ROWS = { 0: 3, 1: 4, 2: 5, 3: 6, 4: 7, 5: 8, 6: 9, 7: 10, 8: 11, 9: 12, 10: 13, 11: 14 };
-
-// Year columns (B=2021, C=2022, D=2023, E=2024, F=2025, G=2026)
-const YEAR_COLS = { 2021: 'B', 2022: 'C', 2023: 'D', 2024: 'E', 2025: 'F', 2026: 'G' };
-const GHL_CALL_LOG_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/98f7f9a2-46b1-482a-9fa0-fa56e28300c0';
-const CALL_SHEET_ID = '1Vllfbhf2ZkFOSCZYwW6qxeQn6B2OYEmfdi3Cl_l42Io';
 const REHAB_ESSENTIALS_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/e2b1cd03-f854-4c7b-a156-44b854ba13bf';
 const EVAL_TEAM_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/iXwd91Z53dXc3hGrbDjv';
 const EVAL_JORDAN_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/aeecdec8-5dbf-4bfe-9bd4-aa33f5962589';
@@ -2410,16 +1124,12 @@ EXTRACT THE FOLLOWING:
 
 1. PLAN OF CARE PT: Look for any mention of who will be handling ongoing care. Return null if not mentioned (system defaults to evaluating PT).
 
-1b. PURCHASE STAGE (only if Converted): Determine if this is a "Stage 1" (first-time/new package purchase) or "Stage 2" (returning patient purchasing again/continuing care). Return null if not Converted.
-
 2. PAYMENT METHOD: Look for any mention of how the patient paid or will pay — Zelle, card on PTEverywhere, cash, check, installments, etc. If unclear return "Unclear from transcript".
-
-2b. PACKAGE PURCHASED (only if Converted): Extract the number of visits purchased. Must be exactly one of: "6", "10", "15", "20", "single". Return null if not Converted or unclear.
 
 3. IF PENDING — determine sub-type:
    - PENDING_VISIT: A follow-up in-person visit explicitly booked with a specific date
-   - PENDING_CALL: A follow-up phone call was explicitly agreed upon WITH a specific date AND time confirmed by both parties. Example: "call me Tuesday at 2pm", "I'll be free Thursday morning around 10". The PT and patient must have mutually agreed on a specific date/time.
-   - PENDING_VAGUE: Anything less than a confirmed date AND time — includes "I'll text you tomorrow", "I'll reach out soon", "call me end of day", "I'll think about it", vague timeframes with no specific time, or patient-initiated contact with no confirmed window. When in doubt use PENDING_VAGUE.
+   - PENDING_CALL: A follow-up phone call has been committed to, even without an exact time. Includes 'I will call you by end of day tomorrow', 'expect my call by Friday', 'I will reach out tomorrow'. Calculate the date from context
+   - PENDING_VAGUE: No firm date/time established, patient said they will think about it, reach out later, or no next step was set
 
 4. IF PENDING_VISIT — extract: follow_up_visit_date (format: YYYY-MM-DD or null)
 
@@ -2433,23 +1143,20 @@ EXTRACT THE FOLLOWING:
 
 7. next_steps: 1-2 sentence summary of what was agreed upon as the next touch point
 
-8. problem_summary: Summary of the patient's presenting problem for Jordan's eyes only. Include: body region(s) being addressed, relevant injury/symptom history mentioned, and the patient's stated long-term goals. 3-5 sentences. Clinical but accessible.
+8. evaluation_summary: 2-3 sentence summary of the evaluation — what the patient came in for, what was assessed, and what the PT recommended. Clinical but concise.
 
-9. treatment_plan: Summary of the immediate treatment plan, clinical recommendations, and any exercises or modalities discussed during the eval. Base this only on what is explicitly mentioned in the transcript. 3-5 sentences.
+9. physician_name: name of any physician mentioned, otherwise null
 
-10. physician_name: name of any physician mentioned, otherwise null
+10. physician_office: office or practice of physician if mentioned, otherwise null
 
-11. physician_office: office or practice of physician if mentioned, otherwise null
-
-12. COACHING NOTES: Provide a specific, honest assessment of the PT's sales process, presentation quality, and objection handling. This is for Jordan's use to identify patterns across PTs over time. Cover:
-    - How objections were handled (or not handled) — be specific about what was said
+11. COACHING NOTES: Provide specific, actionable observations about the PT's sales and communication performance. Focus on:
+    - How objections were handled (or not handled)
     - Whether value was clearly communicated before price was discussed
     - Whether the PT established clear next steps ("book a meeting from a meeting")
     - Quality of rapport building and active listening
     - Any missed opportunities to address patient concerns
     - What was done well
-    - If there are obvious improvements to their sales flow or presentation, state them directly and briefly
-    Be specific — reference actual moments from the transcript. 3-5 bullet points. Format as plain text with each point on a new line starting with a dash.
+    Be specific — reference actual moments from the transcript. 2-4 bullet points. If the conversion was clean with no issues, note what the PT did well. Format as plain text with each point on a new line starting with a dash.
 
 12. RED FLAGS: Note anything that warrants Jordan's immediate attention:
     - Patient expressed frustration, upset, or left abruptly
@@ -2463,9 +1170,7 @@ EXTRACT THE FOLLOWING:
 RETURN ONLY valid JSON with no preamble or markdown:
 {
   "plan_of_care_pt": null,
-  "purchase_stage": null,
   "payment_method": "Unclear from transcript",
-  "package_purchased": null,
   "pending_subtype": null,
   "follow_up_visit_date": null,
   "follow_up_call_date": null,
@@ -2473,52 +1178,12 @@ RETURN ONLY valid JSON with no preamble or markdown:
   "objection_category": null,
   "objection_detail": null,
   "next_steps": null,
-  "problem_summary": null,
-  "treatment_plan": null,
   "evaluation_summary": null,
   "physician_name": null,
   "physician_office": null,
   "coaching_notes": null,
   "red_flags": "None identified."
 }`;
-
-// Send SMS at next available 8am-6pm PT window, with optional delay in hours
-async function sendSMSWithinHours(toPhone, message, delayHours = 0) {
-  const scheduleAt = new Date(Date.now() + delayHours * 60 * 60 * 1000);
-  const ptTime = new Date(scheduleAt.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }));
-  const hour = ptTime.getHours();
-
-  if (delayHours === 0 && hour >= 8 && hour < 18) {
-    // No delay and within hours — send immediately
-    await sendQuoSMS(toPhone, message);
-    console.log('SMS sent immediately (within business hours)');
-    return;
-  }
-
-  // Find next valid 8am-6pm PT window after the delay
-  const sendTime = new Date(ptTime);
-  if (delayHours > 0) {
-    // After delay, check if still within hours
-    if (hour < 8) sendTime.setHours(8, 0, 0, 0);
-    else if (hour >= 18) { sendTime.setDate(sendTime.getDate() + 1); sendTime.setHours(8, 0, 0, 0); }
-  } else {
-    // No delay but outside hours — next 8am
-    if (hour >= 18) { sendTime.setDate(sendTime.getDate() + 1); }
-    sendTime.setHours(8, 0, 0, 0);
-  }
-
-  const msUntil = sendTime - ptTime;
-  console.log('SMS scheduled for ' + sendTime.toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }) + ' PT (' + Math.round(msUntil / 60000) + ' minutes from now)');
-  setTimeout(async () => {
-    try {
-      await sendQuoSMS(toPhone, message);
-      console.log('Scheduled SMS sent to ' + toPhone);
-    } catch (err) {
-      console.error('Scheduled SMS failed:', err.message);
-      await sendSlackError('Scheduled SMS Failed', 'To: ' + toPhone + ' — ' + err.message);
-    }
-  }, msUntil);
-}
 
 async function sendQuoSMS(toPhone, message) {
   try {
@@ -2539,54 +1204,28 @@ async function sendQuoSMS(toPhone, message) {
 
 async function createGHLCalendarAppointment(contactId, calendarId, ptUserId, patientName, ptFirstName, dateStr, timeStr) {
   try {
-    // Parse date (YYYY-MM-DD) and time (H:MM AM/PM or HH:MM) explicitly in PT timezone
-    const [year, month, day] = dateStr.split('-').map(Number);
-    let hours = 9, minutes = 0; // default 9am if time unparseable
-    if (timeStr) {
-      const timeMatch = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
-      if (timeMatch) {
-        hours = parseInt(timeMatch[1]);
-        minutes = parseInt(timeMatch[2]);
-        const meridiem = (timeMatch[3] || '').toUpperCase();
-        if (meridiem === 'PM' && hours < 12) hours += 12;
-        if (meridiem === 'AM' && hours === 12) hours = 0;
-      }
-    }
-    // Build ISO string in PT (UTC-7 PDT / UTC-8 PST) — use fixed offset based on current date
-    const ptOffset = -7; // PDT (adjust to -8 for PST in winter)
-    const utcHours = hours - ptOffset;
-    const appointmentDate = new Date(Date.UTC(year, month - 1, day, utcHours, minutes, 0));
-    if (isNaN(appointmentDate.getTime())) {
-      console.error('Invalid appointment date/time:', dateStr, timeStr);
-      return;
-    }
-    const endDate = new Date(appointmentDate.getTime() + 15 * 60000); // 15 min block
-    console.log('Parsed appointment:', dateStr, timeStr, '→', appointmentDate.toISOString());
+    // Parse date and time into ISO format
+    const dateTimeStr = `${dateStr} ${timeStr}`;
+    const appointmentDate = new Date(dateTimeStr);
+    const endDate = new Date(appointmentDate.getTime() + 30 * 60000); // 30 min default
 
-    const body = {
-      calendarId,
-      locationId: GHL_LOCATION_ID,
-      contactId,
-      title: 'Follow Up Call — ' + (patientName.split(' ')[0] || patientName) + ' x ' + ptFirstName,
-      appointmentStatus: 'confirmed',
-      assignedUserId: ptUserId,
-      startTime: appointmentDate.toISOString(),
-      endTime: endDate.toISOString(),
-      address: 'Phone Call'
-    };
-
-    console.log('Creating GHL calendar appointment:', JSON.stringify(body));
-
-    const response = await axios.post(
+    await axios.post(
       'https://services.leadconnectorhq.com/calendars/events',
-      body,
-      { headers: { 'Authorization': 'Bearer ' + GHL_API_KEY, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
+      {
+        calendarId,
+        locationId: GHL_LOCATION_ID,
+        contactId,
+        title: `Follow Up Call - ${patientName.split(' ')[0]} x ${ptFirstName}`,
+        appointmentStatus: 'confirmed',
+        assignedUserId: ptUserId,
+        startTime: appointmentDate.toISOString(),
+        endTime: endDate.toISOString()
+      },
+      { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
     );
-    console.log('GHL calendar appointment created:', response.data?.id || 'success');
+    console.log('GHL calendar appointment created');
   } catch (err) {
-    const errData = err.response?.data || err.message;
-    console.error('Failed to create calendar appointment:', JSON.stringify(errData));
-    throw err; // re-throw so withRetry can handle it
+    console.error('Failed to create calendar appointment:', err.response?.data || err.message);
   }
 }
 
@@ -2675,88 +1314,15 @@ async function analyzeEvalWithClaude(transcript, outcome) {
   const userMessage = `${EVAL_CLAUDE_PROMPT}\n\nOUTCOME SELECTED BY PT: ${outcome}\n\nTRANSCRIPT:\n${transcript}`;
   const response = await axios.post(
     'https://api.anthropic.com/v1/messages',
-    { model: 'claude-haiku-4-5-20251001', max_tokens: 4096, messages: [{ role: 'user', content: userMessage }] },
+    { model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: userMessage }] },
     { headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' } }
   );
   const text = response.data.content[0].text;
-  const cleaned = text.replace(/```json|```/g, '').trim();
-  try {
-    return JSON.parse(cleaned);
-  } catch (parseErr) {
-    console.error('analyzeEvalWithClaude JSON parse failed. Raw response:', cleaned.substring(0, 500));
-    throw new Error('Claude eval analysis returned invalid JSON: ' + parseErr.message);
-  }
+  return JSON.parse(text.replace(/```json|```/g, '').trim());
 }
-
-// Thank you page
-app.get('/thank-you', (req, res) => {
-  res.send(`<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Submitted — Movement Clinic</title>
-<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@400;500&display=swap" rel="stylesheet">
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: 'DM Sans', sans-serif;
-    background: #f0f4f8;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-  }
-  .card {
-    background: #fff;
-    border-radius: 16px;
-    border: 1px solid #e5e7eb;
-    padding: 48px 40px;
-    max-width: 480px;
-    width: 100%;
-    text-align: center;
-  }
-  .check {
-    width: 64px;
-    height: 64px;
-    background: #d1fae5;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 0 auto 24px;
-    font-size: 28px;
-  }
-  h1 {
-    font-family: 'DM Serif Display', serif;
-    font-size: 26px;
-    font-weight: 400;
-    color: #1a1a1a;
-    margin-bottom: 12px;
-  }
-  p {
-    font-size: 14px;
-    color: #6b7280;
-    line-height: 1.6;
-  }
-</style>
-</head>
-<body>
-<div class="card">
-  <div class="check">✅</div>
-  <h1>Thank you for your submission</h1>
-  <p>GHL has been updated and the summary email is on its way. You can close this tab.</p>
-</div>
-</body>
-</html>`);
-});
 
 // Serve the post-eval form HTML
 app.get('/post-eval', (req, res) => {
-  const ptNames = Object.keys(PT_CALENDARS);
-  const evalPtButtons = Object.keys(PT_CALENDARS).map(pt => '<div class="radio-pill"><input type="radio" name="evaluating_pt" id="ept_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="ept_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('');
-  const pocPtButtons = Object.keys(PT_CALENDARS).map(pt => '<div class="radio-pill"><input type="radio" name="plan_of_care_pt" id="poc_' + pt.replace(/ /g,'_') + '" value="' + pt + '" required><label for="poc_' + pt.replace(/ /g,'_') + '">' + pt + '</label></div>').join('');
   res.send(`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2766,60 +1332,195 @@ app.get('/post-eval', (req, res) => {
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  
   :root {
-    --ink: #1a1a1a; --muted: #6b7280; --border: #e5e7eb;
-    --surface: #f9fafb; --accent: #0f766e; --accent-light: #ccfbf1;
-    --danger: #dc2626; --warn: #f59e0b; --radius: 10px;
+    --ink: #1a1a1a;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --surface: #f9fafb;
+    --accent: #0f766e;
+    --accent-light: #ccfbf1;
+    --danger: #dc2626;
+    --warn: #f59e0b;
+    --radius: 10px;
   }
-  body { font-family: 'DM Sans', sans-serif; background: #f0f4f8; min-height: 100vh; padding: 20px 16px 40px; color: var(--ink); }
-  .shell { max-width: 680px; margin: 0 auto; }
-  .header { text-align: center; margin-bottom: 8px; }
-  .header h1 { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; letter-spacing: -0.5px; }
-  .header p { margin-top: 4px; font-size: 14px; color: var(--muted); }
-  .card { background: #fff; border-radius: 12px; border: 1px solid var(--border); padding: 14px 20px; margin-bottom: 10px; }
-  .card-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 1.5px; color: var(--muted); margin-bottom: 8px; }
-  .field { margin-bottom: 8px; }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #f0f4f8;
+    min-height: 100vh;
+    padding: 40px 16px 80px;
+    color: var(--ink);
+  }
+
+  .shell {
+    max-width: 680px;
+    margin: 0 auto;
+  }
+
+  .header {
+    text-align: center;
+    margin-bottom: 40px;
+  }
+
+  .header h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 32px;
+    font-weight: 400;
+    letter-spacing: -0.5px;
+    color: var(--ink);
+  }
+
+  .header p {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+
+  .card {
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    padding: 32px;
+    margin-bottom: 16px;
+  }
+
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: var(--muted);
+    margin-bottom: 20px;
+  }
+
+  .field { margin-bottom: 20px; }
   .field:last-child { margin-bottom: 0; }
-  label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px; color: var(--ink); }
-  input[type="text"], input[type="email"], input[type="tel"], textarea {
-    width: 100%; padding: 8px 12px; border: 1.5px solid var(--border); border-radius: var(--radius);
-    font-family: 'DM Sans', sans-serif; font-size: 14px; color: var(--ink); background: #fff;
-    transition: border-color 0.15s; outline: none;
+
+  label {
+    display: block;
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    color: var(--ink);
   }
-  input:focus, textarea:focus { border-color: var(--accent); }
-  textarea { resize: vertical; min-height: 80px; line-height: 1.6; }
-  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-  .radio-group { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  input[type="text"],
+  input[type="email"],
+  input[type="tel"],
+  textarea {
+    width: 100%;
+    padding: 10px 14px;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    color: var(--ink);
+    background: #fff;
+    transition: border-color 0.15s;
+    outline: none;
+  }
+
+  input:focus, textarea:focus {
+    border-color: var(--accent);
+  }
+
+  textarea {
+    resize: vertical;
+    min-height: 200px;
+    line-height: 1.6;
+  }
+
+  .row-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .radio-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
   .radio-pill input[type="radio"] { display: none; }
+
   .radio-pill label {
-    display: inline-flex; align-items: center; padding: 6px 14px;
-    border: 1.5px solid var(--border); border-radius: 100px; font-size: 13px; font-weight: 500;
-    cursor: pointer; transition: all 0.15s; color: var(--muted); background: var(--surface); margin: 0;
+    display: inline-flex;
+    align-items: center;
+    padding: 8px 18px;
+    border: 1.5px solid var(--border);
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+    color: var(--muted);
+    background: var(--surface);
+    margin: 0;
   }
-  .radio-pill input[type="radio"]:checked + label { border-color: var(--accent); background: var(--accent-light); color: var(--accent); }
+
+  .radio-pill input[type="radio"]:checked + label {
+    border-color: var(--accent);
+    background: var(--accent-light);
+    color: var(--accent);
+  }
+
   .outcome-pill input[type="radio"]:checked + label.converted { border-color: #059669; background: #d1fae5; color: #065f46; }
-  .outcome-pill input[type="radio"]:checked + label.pending  { border-color: var(--warn); background: #fef3c7; color: #92400e; }
-  .outcome-pill input[type="radio"]:checked + label.lost     { border-color: var(--danger); background: #fee2e2; color: #991b1b; }
-  .outcome-banner { display: none; }
-  .checkin-hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
-  .submit-btn {
-    width: 100%; padding: 12px; background: var(--accent); color: #fff; border: none;
-    border-radius: var(--radius); font-family: 'DM Sans', sans-serif; font-size: 15px;
-    font-weight: 600; cursor: pointer; transition: opacity 0.15s, transform 0.1s; margin-top: 4px;
+  .outcome-pill input[type="radio"]:checked + label.pending { border-color: var(--warn); background: #fef3c7; color: #92400e; }
+  .outcome-pill input[type="radio"]:checked + label.lost { border-color: var(--danger); background: #fee2e2; color: #991b1b; }
+
+  .conditional { display: none; }
+  .conditional.visible { display: block; }
+
+  .conditional-card {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-top: 16px;
   }
+
+  .conditional-card .card-title {
+    margin-bottom: 14px;
+  }
+
+  .submit-btn {
+    width: 100%;
+    padding: 16px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    margin-top: 8px;
+  }
+
   .submit-btn:hover { opacity: 0.92; }
   .submit-btn:active { transform: scale(0.99); }
   .submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-  .status { display: none; padding: 16px 20px; border-radius: var(--radius); font-size: 14px; font-weight: 500; margin-top: 16px; }
+
+  .status {
+    display: none;
+    padding: 16px 20px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-weight: 500;
+    margin-top: 16px;
+  }
+
   .status.success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; display: block; }
-  .status.error   { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
+  .status.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
   .status.loading { background: #e0f2fe; color: #0369a1; border: 1px solid #7dd3fc; display: block; }
-  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
-  .three-col .card { margin-bottom: 0; }
-  .three-col .radio-group { flex-direction: column; }
-  .three-col .radio-pill label { justify-content: center; }
-  @media (max-width: 700px) { .three-col { grid-template-columns: 1fr; } .three-col .card { margin-bottom: 10px; } .three-col .radio-group { flex-direction: row; flex-wrap: wrap; } }
-  @media (max-width: 500px) { .row-2 { grid-template-columns: 1fr; } .card { padding: 14px 16px; } }
+
+  @media (max-width: 500px) {
+    .row-2 { grid-template-columns: 1fr; }
+    .card { padding: 24px 20px; }
+  }
 </style>
 </head>
 <body>
@@ -2828,80 +1529,121 @@ app.get('/post-eval', (req, res) => {
     <h1>Post-Eval Summary</h1>
     <p>Complete immediately after the evaluation session</p>
   </div>
+
   <form id="evalForm">
 
     <!-- Patient Info -->
     <div class="card">
       <div class="card-title">Patient Information</div>
       <div class="row-2">
-        <div class="field"><label>First Name</label><input type="text" name="patient_first_name" required placeholder="First name"></div>
-        <div class="field"><label>Last Name</label><input type="text" name="patient_last_name" required placeholder="Last name"></div>
+        <div class="field">
+          <label>First Name</label>
+          <input type="text" name="patient_first_name" required placeholder="First name">
+        </div>
+        <div class="field">
+          <label>Last Name</label>
+          <input type="text" name="patient_last_name" required placeholder="Last name">
+        </div>
       </div>
       <div class="row-2">
-        <div class="field"><label>Email</label><input type="email" name="patient_email" required placeholder="patient@email.com"></div>
-        <div class="field"><label>Phone</label><input type="tel" name="patient_phone" required placeholder="6265550000"></div>
+        <div class="field">
+          <label>Email</label>
+          <input type="email" name="patient_email" required placeholder="patient@email.com">
+        </div>
+        <div class="field">
+          <label>Phone</label>
+          <input type="tel" name="patient_phone" required placeholder="+1 (555) 000-0000">
+        </div>
       </div>
     </div>
 
-    <!-- Evaluating PT + Plan of Care PT + Outcome — three column on desktop -->
-    <div class="three-col">
-
-      <div class="card">
-        <div class="card-title">Evaluating PT</div>
-        <div class="field">
-          <div class="radio-group">
-            ${evalPtButtons}
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Plan of Care PT</div>
-        <div class="field">
-          <div class="radio-group">
-            ${pocPtButtons}
-          </div>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="card-title">Outcome</div>
-        <div class="field">
-          <div class="radio-group">
-            <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_converted" value="Converted" required><label for="outcome_converted" class="converted">✅ Converted</label></div>
-            <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_pending" value="Pending"><label for="outcome_pending" class="pending">⏳ Pending</label></div>
-            <div class="radio-pill outcome-pill"><input type="radio" name="outcome" id="outcome_lost" value="Lost"><label for="outcome_lost" class="lost">❌ Did Not Convert</label></div>
-          </div>
-        </div>
-      </div>
-
-    </div>
-
-    <!-- Previous Purchase -->
+    <!-- PT Selection -->
     <div class="card">
-      <div class="card-title">Previous Package Purchase</div>
+      <div class="card-title">Evaluating Physical Therapist</div>
       <div class="field">
-        <label>Has this person purchased a package from us previously?</label>
-        <div class="radio-group">
-          <div class="radio-pill"><input type="radio" name="previous_purchase" id="prev_yes" value="Yes" required><label for="prev_yes">Yes</label></div>
-          <div class="radio-pill"><input type="radio" name="previous_purchase" id="prev_no" value="No"><label for="prev_no">No</label></div>
+        <div class="radio-group" id="ptGroup">
+          ${Object.keys(PT_CALENDARS).map(pt => `
+          <div class="radio-pill">
+            <input type="radio" name="evaluating_pt" id="pt_${pt.replace(' ', '_')}" value="${pt}" required>
+            <label for="pt_${pt.replace(' ', '_')}">${pt}</label>
+          </div>`).join('')}
         </div>
       </div>
     </div>
 
-    <!-- Check-In Text -->
+    <!-- Outcome -->
     <div class="card">
-      <div class="card-title">Post-Eval Check-In Text</div>
+      <div class="card-title">Evaluation Outcome</div>
       <div class="field">
-        <label>Send a check-in text to this patient?</label>
-        <div class="radio-group">
-          <div class="radio-pill"><input type="radio" name="send_checkin" id="checkin_yes" value="Yes" required><label for="checkin_yes">Yes</label></div>
-          <div class="radio-pill"><input type="radio" name="send_checkin" id="checkin_no" value="No"><label for="checkin_no">No</label></div>
+        <div class="radio-group" id="outcomeGroup">
+          <div class="radio-pill outcome-pill">
+            <input type="radio" name="outcome" id="outcome_converted" value="Converted" required>
+            <label for="outcome_converted" class="converted">Converted</label>
+          </div>
+          <div class="radio-pill outcome-pill">
+            <input type="radio" name="outcome" id="outcome_pending" value="Pending">
+            <label for="outcome_pending" class="pending">Pending</label>
+          </div>
+          <div class="radio-pill outcome-pill">
+            <input type="radio" name="outcome" id="outcome_lost" value="Lost">
+            <label for="outcome_lost" class="lost">Lost</label>
+          </div>
+        </div>
+
+        <!-- Converted sub-options -->
+        <div class="conditional" id="convertedOptions">
+          <div class="conditional-card">
+            <div class="card-title">Purchase Stage</div>
+            <div class="radio-group">
+              <div class="radio-pill">
+                <input type="radio" name="stage" id="stage1" value="Stage 1">
+                <label for="stage1">Stage 1 — First Time Purchase</label>
+              </div>
+              <div class="radio-pill">
+                <input type="radio" name="stage" id="stage2" value="Stage 2">
+                <label for="stage2">Stage 2 — Returning Patient</label>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
+    </div>
+
+    <!-- Additional Options -->
+    <div class="card">
+      <div class="card-title">Additional Options</div>
       <div class="field">
-        <label>Check-In Message <span style="font-weight:400;color:var(--muted);">(leave blank if No)</span></label>
-        <textarea name="checkin_text" placeholder="Write your check-in message here..." rows="3"></textarea>
+        <label>Appropriate for Rehab Essentials Emails?</label>
+        <div class="radio-group">
+          <div class="radio-pill">
+            <input type="radio" name="rehab_essentials" id="rehab_yes" value="Yes" required>
+            <label for="rehab_yes">Yes</label>
+          </div>
+          <div class="radio-pill">
+            <input type="radio" name="rehab_essentials" id="rehab_no" value="No">
+            <label for="rehab_no">No</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Send Post-Eval Check-In Text?</label>
+        <div class="radio-group">
+          <div class="radio-pill">
+            <input type="radio" name="send_checkin" id="checkin_yes" value="Yes" required>
+            <label for="checkin_yes">Yes</label>
+          </div>
+          <div class="radio-pill">
+            <input type="radio" name="send_checkin" id="checkin_no" value="No">
+            <label for="checkin_no">No</label>
+          </div>
+        </div>
+        <div class="conditional" id="checkinTextBox">
+          <div class="conditional-card">
+            <div class="card-title">Check-In Message</div>
+            <textarea name="checkin_text" placeholder="Write your check-in message here...&#10;&#10;Example: Hey! It's [Name] here from The Movement Clinic. I wanted to see how you're feeling after our session. Give me an update when you get a chance." rows="5"></textarea>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -2909,37 +1651,64 @@ app.get('/post-eval', (req, res) => {
     <div class="card">
       <div class="card-title">Evaluation Transcript</div>
       <div class="field">
-        <textarea name="transcript" required placeholder="Paste the full evaluation transcript here..." rows="7"></textarea>
+        <textarea name="transcript" required placeholder="Paste the full evaluation transcript here..." rows="12"></textarea>
       </div>
     </div>
 
     <button type="submit" class="submit-btn" id="submitBtn">Submit Evaluation</button>
     <div class="status" id="statusMsg"></div>
+
   </form>
 </div>
+
 <script>
-  // Pre-fill from URL params (Slack button)
-  (function() {
-    const p = new URLSearchParams(window.location.search);
-    if (p.get('first')) document.querySelector('[name="patient_first_name"]').value = p.get('first');
-    if (p.get('last'))  document.querySelector('[name="patient_last_name"]').value  = p.get('last');
-    if (p.get('phone')) document.querySelector('[name="patient_phone"]').value       = p.get('phone');
-    if (p.get('email')) document.querySelector('[name="patient_email"]').value       = p.get('email');
-  })();
+  // Conditional logic
+  document.querySelectorAll('input[name="outcome"]').forEach(radio => {
+    radio.addEventListener('change', function() {
+      document.getElementById('convertedOptions').classList.toggle('visible', this.value === 'Converted');
+    });
+  });
 
+  document.querySelectorAll('input[name="send_checkin"]').forEach(radio => {
+    radio.addEventListener('change', function() {
+      document.getElementById('checkinTextBox').classList.toggle('visible', this.value === 'Yes');
+    });
+  });
 
-
-  // Form submit
-  document.getElementById('evalForm').addEventListener('submit', function(e) {
+  // Form submission
+  document.getElementById('evalForm').addEventListener('submit', async function(e) {
     e.preventDefault();
+    const btn = document.getElementById('submitBtn');
+    const status = document.getElementById('statusMsg');
+    btn.disabled = true;
+    btn.textContent = 'Processing...';
+    status.className = 'status loading';
+    status.textContent = 'This takes about 90 seconds. Go ahead and close this page when you're ready. Things will continue to process in the background.';
+
     const data = Object.fromEntries(new FormData(this));
-    // Fire and forget — redirect immediately, processing continues on server
-    fetch('/post-eval', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).catch(() => {}); // swallow errors — Slack handles failure notification
-    window.location.href = '/thank-you';
+
+    try {
+      const res = await fetch('/post-eval', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data)
+      });
+      const result = await res.json();
+      if (result.success) {
+        status.className = 'status success';
+        status.textContent = 'Evaluation submitted successfully. GHL has been updated.';
+        this.reset();
+        document.querySelectorAll('.conditional').forEach(el => el.classList.remove('visible'));
+      } else {
+        throw new Error(result.error || 'Unknown error');
+      }
+    } catch (err) {
+      status.className = 'status error';
+      status.textContent = 'Something went wrong: ' + err.message + '. Please try again or contact Jordan.';
+    }
+
+    btn.disabled = false;
+    btn.textContent = 'Submit Evaluation';
   });
 </script>
 </body>
@@ -2955,9 +1724,9 @@ app.post('/post-eval', async (req, res) => {
       patient_email,
       patient_phone,
       evaluating_pt,
-      plan_of_care_pt: plan_of_care_pt_form,
-      previous_purchase,
       outcome,
+      stage,
+      rehab_essentials,
       send_checkin,
       checkin_text,
       transcript
@@ -2992,8 +1761,6 @@ app.post('/post-eval', async (req, res) => {
 
     console.log(`Found contact: ${contact.id}`);
 
-    const patientFullName = `${patient_first_name} ${patient_last_name}`;
-
     // Find or create Customer Pipeline opportunity
     const allOpps = await getAllContactOpportunities(contact.id);
     let customerOpp = allOpps.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID && o.status === 'open');
@@ -3001,11 +1768,12 @@ app.post('/post-eval', async (req, res) => {
 
     if (!customerOpp) {
       console.log('No Customer Pipeline opportunity found — creating one at Evaluation Scheduled');
+      const patientFullNameTemp = `${patient_first_name} ${patient_last_name}`;
       customerOpp = await createGHLOpportunity(
         contact.id,
         EVAL_CUSTOMER_PIPELINE_ID,
         EVAL_CUSTOMER_STAGES.EVALUATION_SCHEDULED,
-        patientFullName
+        patientFullNameTemp
       );
       customerOppCreated = true;
       console.log(`Created Customer Pipeline opportunity: ${customerOpp.id}`);
@@ -3013,7 +1781,7 @@ app.post('/post-eval', async (req, res) => {
 
     // Always move to Evaluation Held first and pause 60 seconds for GHL to record the stage
     console.log('Moving to Evaluation Held stage...');
-    await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.EVALUATION_HELD, null), 'Move to Evaluation Held — ' + patientFullName);
+    await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.EVALUATION_HELD, null);
     console.log('Waiting 60 seconds for GHL to record Evaluation Held stage...');
     await new Promise(resolve => setTimeout(resolve, 60000));
     console.log('60 second pause complete — proceeding with outcome stage');
@@ -3022,26 +1790,10 @@ app.post('/post-eval', async (req, res) => {
     const claudeResult = await analyzeEvalWithClaude(transcript, outcome);
     console.log(`Claude eval analysis complete: pending_subtype=${claudeResult.pending_subtype}`);
 
-    // Determine purchase stage from form question (overrides Claude's guess)
-    const purchaseStage = previous_purchase === 'Yes' ? 'Stage 2' : previous_purchase === 'No' ? 'Stage 1' : claudeResult.purchase_stage || null;
-
-    // Calculate opportunity value from package and payment method
-    const isZelle = (claudeResult.payment_method || '').toLowerCase().includes('zelle');
-    const packagePricing = {
-      '6':      { standard: 1350, zelle: 1320 },
-      '10':     { standard: 2050, zelle: 2000 },
-      '15':     { standard: 2775, zelle: 2700 },
-      '20':     { standard: 3500, zelle: 3400 },
-      'single': { standard: 250,  zelle: 250  }
-    };
-    const packageKey = claudeResult.package_purchased;
-    const opportunityValue = packageKey && packagePricing[packageKey]
-      ? (isZelle ? packagePricing[packageKey].zelle : packagePricing[packageKey].standard)
-      : null;
-
     const ptInfo = PT_CALENDARS[evaluating_pt] || {};
-    const planOfCarePT = plan_of_care_pt_form || claudeResult.plan_of_care_pt || evaluating_pt;
+    const planOfCarePT = claudeResult.plan_of_care_pt || evaluating_pt;
     const timestamp = getTimestamp();
+    const patientFullName = `${patient_first_name} ${patient_last_name}`;
 
     // Determine stage update and actions based on outcome
     let newStageId = null;
@@ -3049,17 +1801,17 @@ app.post('/post-eval', async (req, res) => {
     if (customerOppCreated) noteLines.push('ℹ️ Customer Pipeline opportunity auto-created (no existing card found).');
 
     if (outcome === 'Converted') {
-      noteLines.push(`Purchase Stage: ${purchaseStage || "Unclear from transcript"}`);
+      noteLines.push(`Purchase Stage: ${stage}`);
       if (claudeResult.next_steps) noteLines.push(`Next Steps: ${claudeResult.next_steps}`);
 
-      if (purchaseStage === 'Stage 1') {
+      if (stage === 'Stage 1') {
         // Stage 1 — move Customer Pipeline card to Package Purchased
         newStageId = EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED;
-        await sendSMSWithinHours(patient_phone, STAGE1_TEXT(patient_first_name));
+        await sendQuoSMS(patient_phone, STAGE1_TEXT(patient_first_name));
         noteLines.push('✅ Customer Pipeline moved to Package Purchased.');
         noteLines.push('✅ Stage 1 superbill/physician text sent via Quo.');
 
-      } else if (purchaseStage === 'Stage 2') {
+      } else if (stage === 'Stage 2') {
         // Stage 2 — Customer Pipeline card should already be at Package Purchased
         // Check if it is — if not, update it
         const isAlreadyPurchased = customerOpp.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED;
@@ -3070,41 +1822,17 @@ app.post('/post-eval', async (req, res) => {
           noteLines.push('ℹ️ Customer Pipeline already at Package Purchased — no stage change needed.');
         }
 
-        // Create Continuity Pipeline opportunity for Stage 2 — skip if one already exists
-        const existingContinuityOpp = allOpps.find(o => o.pipelineId === CONTINUITY_PIPELINE_ID);
-        if (existingContinuityOpp) {
-          noteLines.push('ℹ️ Continuity Pipeline card already exists — no new card created.');
-        } else {
-          try {
-            await withRetry(() => createGHLOpportunity(contact.id, CONTINUITY_PIPELINE_ID, CONTINUITY_PURCHASED_STAGE_ID, patientFullName), 'Create Continuity Pipeline card — ' + patientFullName);
-            noteLines.push('✅ Continuity Pipeline opportunity created at Continuity Purchased.');
-          } catch (err) {
-            console.error('Failed to create continuity opportunity:', err.message);
-            noteLines.push('⚠️ Failed to create Continuity Pipeline opportunity — please add manually.');
-          }
-        }
-
-        await sendSMSWithinHours(patient_phone, STAGE2_TEXT(patient_first_name));
-        noteLines.push('✅ Stage 2 superbill/physician text sent via Quo.');
-      }
-
-      // If converted but package unclear — create task for info@ to update value manually
-      if (outcome === 'Converted' && opportunityValue === null) {
+        // Always create Continuity Pipeline opportunity for Stage 2
         try {
-          const valueTaskDue = new Date();
-          valueTaskDue.setDate(valueTaskDue.getDate() + 1);
-          const oppUrl = customerOpp ? 'https://app.gohighlevel.com/v2/location/' + GHL_LOCATION_ID + '/opportunities/' + customerOpp.id : 'GHL';
-          await createGHLTask(
-            contact.id,
-            'Update Opportunity Value — ' + patientFullName + ' (' + oppUrl + ')',
-            valueTaskDue,
-            'Claude could not determine the package purchased from the eval transcript. Please review the opportunity card and update the monetary value manually. Opportunity: ' + oppUrl
-          );
-          noteLines.push('⚠️ Package/value unclear from transcript — task created for manual value update.');
-          console.log('Value-unclear task created for ' + patientFullName);
-        } catch (taskErr) {
-          console.error('Failed to create value task:', taskErr.message);
+          await createGHLOpportunity(contact.id, CONTINUITY_PIPELINE_ID, CONTINUITY_PURCHASED_STAGE_ID, patientFullName);
+          noteLines.push('✅ Continuity Pipeline opportunity created at Continuity Purchased.');
+        } catch (err) {
+          console.error('Failed to create continuity opportunity:', err.message);
+          noteLines.push('⚠️ Failed to create Continuity Pipeline opportunity — please add manually.');
         }
+
+        await sendQuoSMS(patient_phone, STAGE2_TEXT(patient_first_name));
+        noteLines.push('✅ Stage 2 superbill/physician text sent via Quo.');
       }
 
     } else if (outcome === 'Pending') {
@@ -3124,7 +1852,7 @@ app.post('/post-eval', async (req, res) => {
         // Create GHL calendar appointment
         if (claudeResult.follow_up_call_date && claudeResult.follow_up_call_time && ptInfo.calendarId) {
           const ptFirstName = evaluating_pt.split(' ')[0];
-          await withRetry(() => createGHLCalendarAppointment(
+          await createGHLCalendarAppointment(
             contact.id,
             ptInfo.calendarId,
             ptInfo.ghlUserId,
@@ -3132,7 +1860,7 @@ app.post('/post-eval', async (req, res) => {
             ptFirstName,
             claudeResult.follow_up_call_date,
             claudeResult.follow_up_call_time
-          ), 'Create calendar appointment — ' + patientFullName);
+          );
           noteLines.push(`✅ GHL calendar appointment created for ${evaluating_pt}.`);
         }
 
@@ -3171,19 +1899,17 @@ app.post('/post-eval', async (req, res) => {
       noteLines.push(`Physician: ${claudeResult.physician_name}${claudeResult.physician_office ? ` — ${claudeResult.physician_office}` : ''}`);
     }
 
-    // Update Customer Pipeline opportunity stage and/or value
+    // Update Customer Pipeline opportunity stage
     if (newStageId) {
-      await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, opportunityValue), 'Final stage update — ' + patientFullName);
+      await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, null);
       console.log(`Customer Pipeline updated to stage: ${newStageId}`);
-    } else if (opportunityValue !== null) {
-      // Stage unchanged but update the monetary value
-      await withRetry(() => updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, customerOpp.pipelineStageId, opportunityValue), 'Update opportunity value — ' + patientFullName);
-      console.log(`Opportunity value updated to: ${opportunityValue}`);
     }
 
     // Assign opportunity to plan of care PT
     const planOfCarePTInfo = PT_CALENDARS[planOfCarePT] || PT_CALENDARS[evaluating_pt] || {};
-    if (planOfCarePTInfo.ghlUserId && customerOpp) {
+    if (planOfCarePTInfo.ghlUserId && activeOpportunity) {
+      await assignOpportunityToUser(activeOpportunity ? activeOpportunity.id : customerOpp.id, planOfCarePTInfo.ghlUserId);
+    } else if (planOfCarePTInfo.ghlUserId) {
       await assignOpportunityToUser(customerOpp.id, planOfCarePTInfo.ghlUserId);
     }
 
@@ -3191,51 +1917,48 @@ app.post('/post-eval', async (req, res) => {
     await addNoteToContact(contact.id, noteLines.join('\n'));
     console.log('Note added to contact');
 
-    // Check-in text is handled by GHL workflow (48hr delay) — Railway fires the trigger webhook only
-    // The GHL workflow handles the actual Quo SMS send with 48hr wait built in
-    if (send_checkin === 'Yes' && checkin_text && checkin_text.trim() && process.env.CHECKIN_WEBHOOK) {
+    // Rehab Essentials webhook
+    if (rehab_essentials === 'Yes') {
       try {
-        await axios.post(process.env.CHECKIN_WEBHOOK, {
-          contact_phone: patient_phone,
-          contact_name: patientFullName,
-          checkin_text: checkin_text.trim()
+        await axios.post(REHAB_ESSENTIALS_WEBHOOK, {
+          contact_id: contact.id,
+          patient_first_name,
+          patient_last_name,
+          patient_email,
+          patient_phone,
+          evaluating_pt
         }, { headers: { 'Content-Type': 'application/json' } });
-        console.log('Check-in text GHL webhook fired for ' + patientFullName);
+        console.log('Rehab Essentials webhook fired');
       } catch (err) {
-        console.error('Failed to fire check-in webhook:', err.message);
-        await sendSlackError('Check-In Webhook Failed — ' + patientFullName, err.message);
+        console.error('Failed to fire Rehab Essentials webhook:', err.message);
       }
     }
 
     // Google Sheet logger webhook
     try {
       await axios.post(GHL_SHEET_WEBHOOK, {
-        timestamp: getTimestamp(),
-        first_name: String(patient_first_name || ''),
-        last_name: String(patient_last_name || ''),
-        email: String(patient_email || ''),
-        phone: String(patient_phone || ''),
-        evaluating_pt: String(evaluating_pt || ''),
-        plan_of_care_pt: String(planOfCarePT || ''),
-        outcome: String(outcome || ''),
-        stage: String(purchaseStage || 'N/A'),
+        timestamp: new Date().toISOString(),
+        date_added: new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }),
+        patient_first_name,
+        patient_last_name,
+        patient_email,
+        patient_phone,
+        evaluating_pt,
+        plan_of_care_pt: planOfCarePT,
         evaluation_date: new Date().toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' }),
-        rehab_essentials: 'N/A',
-        send_checkin_text_question: String(send_checkin || ''),
-        checkin_text_sent: String(send_checkin || ''),
-        payment_method: String(claudeResult.payment_method || 'Unclear from transcript'),
-        pending_subtype: String(claudeResult.pending_subtype || ''),
-        follow_up_visit_date: String(claudeResult.follow_up_visit_date || ''),
-        follow_up_phone_call_date: String(claudeResult.follow_up_call_date || ''),
-        follow_up_phone_call_time: String(claudeResult.follow_up_call_time || ''),
-        objection_category: String(claudeResult.objection_category || ''),
-        objection_detail: String(claudeResult.objection_detail || ''),
-        evaluation_summary: String(claudeResult.evaluation_summary || ''),
-        next_steps: String(claudeResult.next_steps || ''),
-        red_flags: String(claudeResult.red_flags || 'None identified.'),
-        coaching_notes: String(claudeResult.coaching_notes || ''),
-        calendar_appointment_created: String(claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date ? 'Yes' : 'No'),
-        continuity_pipeline_created: String(purchaseStage === 'Stage 2' ? 'Yes' : 'No')
+        conversion_outcome: outcome,
+        stage_purchase: stage || 'N/A',
+        objection_category: claudeResult.objection_category || '',
+        objection_detail: claudeResult.objection_detail || '',
+        next_steps: claudeResult.next_steps || '',
+        follow_up_visit_date: claudeResult.follow_up_visit_date || '',
+        follow_up_call_date: claudeResult.follow_up_call_date || '',
+        follow_up_call_time: claudeResult.follow_up_call_time || '',
+        physician_name: claudeResult.physician_name || '',
+        physician_office: claudeResult.physician_office || '',
+        rehab_essentials,
+        send_checkin_text: send_checkin,
+        checkin_text: checkin_text || ''
       }, { headers: { 'Content-Type': 'application/json' } });
       console.log('Sheet logger webhook fired');
     } catch (err) {
@@ -3250,7 +1973,7 @@ app.post('/post-eval', async (req, res) => {
 
   <table style="width:100%; border-collapse:collapse; background:#eaf4ff; margin-bottom:20px;">
     <tr><td style="padding:14px 16px; border-left:4px solid #2563eb; font-size:14px; font-weight:600; color:#1e3a5f;">
-      Post-Eval Outcome: ${outcome}${purchaseStage ? ' — ' + purchaseStage : ''}
+      Post-Eval Outcome: ${outcome}${stage ? ' — ' + stage : ''}
     </td></tr>
   </table>
 
@@ -3267,12 +1990,13 @@ app.post('/post-eval', async (req, res) => {
   <table style="width:100%; border-collapse:collapse; margin-bottom:20px;">
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; width:45%; border-bottom:1px solid #f0f0f0;">Pipeline</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">Customer Pipeline</td></tr>
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Stage Updated To</td><td style="padding:9px 0; font-size:13px; font-weight:600; color:#0f6e56; border-bottom:1px solid #f0f0f0;">${outcome === 'Converted' ? 'Package Purchased' : outcome === 'Lost' ? 'Closed/Lost' : claudeResult.pending_subtype === 'PENDING_CALL' ? 'Pending - Follow Up Phone Call Booked' : claudeResult.pending_subtype === 'PENDING_VISIT' ? 'Pending - Follow Up Visit Booked' : 'Not a Good Time - Needs Follow Up'}</td></tr>
-    ${purchaseStage === 'Stage 2' ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Continuity Pipeline</td><td style="padding:9px 0; font-size:13px; color:#0f6e56; border-bottom:1px solid #f0f0f0;">✅ New opportunity created at Continuity Purchased</td></tr>' : ''}
+    ${stage === 'Stage 2' ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Continuity Pipeline</td><td style="padding:9px 0; font-size:13px; color:#0f6e56; border-bottom:1px solid #f0f0f0;">✅ New opportunity created at Continuity Purchased</td></tr>' : ''}
     ${claudeResult.follow_up_call_date ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Follow Up Call</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.follow_up_call_date + ' at ' + claudeResult.follow_up_call_time + ' — Calendar appointment created</td></tr>' : ''}
     ${claudeResult.follow_up_visit_date ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Follow Up Visit</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.follow_up_visit_date + '</td></tr>' : ''}
     ${claudeResult.objection_category ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Objection Category</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.objection_category + '</td></tr>' : ''}
     ${claudeResult.objection_detail ? '<tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Objection Detail</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">' + claudeResult.objection_detail + '</td></tr>' : ''}
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Note Added</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">Yes</td></tr>
+    <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666; border-bottom:1px solid #f0f0f0;">Rehab Essentials</td><td style="padding:9px 0; font-size:13px; color:#333333; border-bottom:1px solid #f0f0f0;">${rehab_essentials}</td></tr>
     <tr><td style="padding:9px 0; font-size:13px; font-weight:600; color:#666666;">Check-In Text Requested</td><td style="padding:9px 0; font-size:13px; color:#333333;">${send_checkin}</td></tr>
   </table>
 
@@ -3288,14 +2012,14 @@ app.post('/post-eval', async (req, res) => {
       evaluating_pt: String(evaluating_pt || ''),
       plan_of_care_pt: String(planOfCarePT || ''),
       outcome: String(outcome || ''),
-      stage: String(purchaseStage || 'N/A'),
+      stage: String(stage || 'N/A'),
       payment_method: String(claudeResult.payment_method || 'Unclear from transcript'),
       evaluation_summary: String(claudeResult.evaluation_summary || ''),
       next_steps: String(claudeResult.next_steps || ''),
       red_flags: String(claudeResult.red_flags || 'None identified.'),
       calendar_appointment_created: String(claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date ? 'Yes — ' + claudeResult.follow_up_call_date + ' at ' + claudeResult.follow_up_call_time : 'No'),
-      continuity_opportunity_created: String(purchaseStage === 'Stage 2' ? 'Yes — Continuity Purchased' : 'No'),
-      rehab_essentials: 'N/A',
+      continuity_opportunity_created: String(stage === 'Stage 2' ? 'Yes — Continuity Purchased' : 'No'),
+      rehab_essentials: String(rehab_essentials || ''),
       checkin_text_scheduled: String(send_checkin || ''),
       send_checkin_text: String(send_checkin || ''),
       checkin_text: String(checkin_text || ''),
@@ -3305,10 +2029,7 @@ app.post('/post-eval', async (req, res) => {
       physician_office: String(claudeResult.physician_office || '')
     };
 
-    // Generate Claude-written eval emails — send immediately via Resend + Slack notification + Redis log
-    console.log('Waiting 65 seconds before generating eval summary emails to avoid rate limit...');
-    await new Promise(resolve => setTimeout(resolve, 65000));
-    console.log('Generating eval summary emails...');
+    // Generate Claude-written email content for post-eval
     try {
       const evalEmailContent = await generateEvalEmailContent({
         contactName: patientFullName,
@@ -3316,15 +2037,14 @@ app.post('/post-eval', async (req, res) => {
         evaluatingPT: evaluating_pt,
         planOfCarePT: planOfCarePT,
         outcome,
-        stage: purchaseStage || null,
+        stage: stage || null,
         paymentMethod: claudeResult.payment_method || 'Unclear from transcript',
-        problemSummary: claudeResult.problem_summary || '',
-        treatmentPlan: claudeResult.treatment_plan || '',
         evaluationSummary: claudeResult.evaluation_summary || '',
         nextSteps: claudeResult.next_steps || '',
         redFlags: claudeResult.red_flags || 'None identified.',
         calendarCreated: evalWebhookPayload.calendar_appointment_created,
         continuityCreated: evalWebhookPayload.continuity_opportunity_created,
+        rehabEssentials: rehab_essentials,
         checkinScheduled: send_checkin,
         objectionCategory: claudeResult.objection_category || null,
         objectionDetail: claudeResult.objection_detail || null,
@@ -3332,152 +2052,62 @@ app.post('/post-eval', async (req, res) => {
         physicianOffice: claudeResult.physician_office || null,
         coachingNotes: claudeResult.coaching_notes || 'No coaching notes generated.'
       });
-      console.log('Eval email content generated — sending...');
 
-      const evalSubject = 'Post-Eval Summary — ' + patientFullName + ' (' + outcome + (purchaseStage ? ' ' + purchaseStage : '') + ')';
+      // Team email — no coaching notes
+      await axios.post(EVAL_TEAM_WEBHOOK, {
+        email_body: evalEmailContent.team_email_html || '',
+        slack_message: evalEmailContent.slack_message || '',
+        contact_name: String(patientFullName || ''),
+        contact_id: String(contact.id || '')
+      }, { headers: { 'Content-Type': 'application/json' } });
+      console.log('Team eval webhook fired');
 
-      // Jordan email only — full summary with clinical notes and coaching
-      await sendEmailAndSlack({
-        to: [JORDAN_EMAIL],
-        subject: evalSubject,
-        html: evalEmailContent.jordan_email_html || '<p>Eval processed for ' + patientFullName + '</p>',
-        slackMessage: null
-      });
-      console.log('Jordan eval email sent');
-
-      // Real-time Slack notification for eval
-      const evalStageDisplay = outcome === 'Converted'
-        ? 'Package Purchased'
-        : outcome === 'Lost'
-          ? 'Closed/Lost'
-          : claudeResult.pending_subtype === 'PENDING_CALL'
-            ? 'Pending — Follow Up Phone Call Booked'
-            : claudeResult.pending_subtype === 'PENDING_VISIT'
-              ? 'Pending — Follow Up Visit Booked'
-              : 'Pending — Needs Follow Up (No Firm Time Established)';
-
-      const evalBlocks = buildEvalSlackBlocks({
-        patientName: patientFullName,
-        patientPhone: patient_phone,
-        evalDate: getTimestamp(),
-        evaluatingPT: evaluating_pt,
-        planOfCarePT: planOfCarePT,
-        outcome: claudeResult.next_steps || 'See email for full details',
-        stageDisplay: evalStageDisplay,
-        redFlags: claudeResult.red_flags || 'None',
-        opportunityId: customerOpp ? customerOpp.id : null
-      });
-      await sendSlackMessage(evalBlocks);
-
-      // Post outcome summary to deals board channel
-      try {
-        const outcomeEmoji = outcome === 'Converted' ? '✅' : outcome === 'Pending' ? '⏳' : '❌';
-        const outcomeLabel = outcome === 'Converted' ? 'CONVERTED' : outcome === 'Pending' ? 'PENDING' : 'DID NOT CONVERT';
-        const ghlOppUrl = customerOpp
-          ? 'https://app.gohighlevel.com/v2/location/6oqyEZ6nlqPw4cDsaKzi/opportunities/' + customerOpp.id
-          : null;
-        const nameDisplay = ghlOppUrl
-          ? '<' + ghlOppUrl + '|' + capitalizeFullName(patientFullName) + '>'
-          : capitalizeFullName(patientFullName);
-
-        // Outcome color coding
-        const outcomeColor = outcome === 'Converted' ? '#059669' : outcome === 'Pending' ? '#d97706' : '#dc2626';
-        const outcomeText = outcome === 'Converted'
-          ? '*✅ CONVERTED*'
-          : outcome === 'Pending'
-            ? (claudeResult.pending_subtype === 'PENDING_CALL'
-                ? '*⏳ PENDING — FOLLOW UP PHONE CALL*'
-                : claudeResult.pending_subtype === 'PENDING_VISIT'
-                  ? '*⏳ PENDING — FOLLOW UP VISIT*'
-                  : '*⏳ PENDING — NO FIRM DATE*')
-            : '*❌ DID NOT CONVERT*';
-
-        const dealsBlocks = [
-          {
-            type: 'section',
-            text: { type: 'mrkdwn', text: outcomeText }
-          },
-          { type: 'divider' },
-          {
-            type: 'section',
-            fields: [
-              { type: 'mrkdwn', text: '*Patient*\n' + nameDisplay },
-              { type: 'mrkdwn', text: '*Phone*\n' + (patient_phone || 'Unknown') }
-            ]
-          },
-          {
-            type: 'section',
-            fields: [
-              { type: 'mrkdwn', text: '*Evaluating PT*\n' + evaluating_pt },
-              { type: 'mrkdwn', text: '*Plan of Care PT*\n' + planOfCarePT }
-            ]
-          }
-        ];
-
-        // Objections (Lost)
-        if (outcome === 'Lost' && claudeResult.objection_category) {
-          dealsBlocks.push({
-            type: 'section',
-            text: { type: 'mrkdwn', text: '*Objection*\n' + claudeResult.objection_category + (claudeResult.objection_detail ? '\n' + claudeResult.objection_detail : '') }
-          });
-        }
-
-        // Follow-up details (Pending)
-        if (outcome === 'Pending') {
-          let followUpText = '';
-          if (claudeResult.pending_subtype === 'PENDING_CALL' && claudeResult.follow_up_call_date) {
-            followUpText = 'Follow-Up Call: ' + claudeResult.follow_up_call_date + (claudeResult.follow_up_call_time ? ' at ' + claudeResult.follow_up_call_time : '') + ' — Calendar invite created';
-          } else if (claudeResult.pending_subtype === 'PENDING_VISIT' && claudeResult.follow_up_visit_date) {
-            followUpText = 'Follow-Up Visit: ' + claudeResult.follow_up_visit_date;
-          } else {
-            followUpText = 'No firm follow-up time established — task created for PT';
-          }
-          dealsBlocks.push({
-            type: 'section',
-            text: { type: 'mrkdwn', text: '*Follow-Up*\n' + followUpText }
-          });
-        }
-
-        // Red flags
-        const hasRedFlag = claudeResult.red_flags && claudeResult.red_flags !== 'None' && claudeResult.red_flags !== 'None identified.';
-        if (hasRedFlag) {
-          dealsBlocks.push({
-            type: 'section',
-            text: { type: 'mrkdwn', text: ':warning: *Red Flag*\n' + claudeResult.red_flags }
-          });
-        }
-
-        await axios.post('https://slack.com/api/chat.postMessage', {
-          channel: SLACK_CONVERSIONS_CHANNEL_ID,
-          text: outcomeEmoji + ' Post-Eval ' + outcomeLabel + ' — ' + patientFullName,
-          blocks: dealsBlocks
-        }, { headers: { 'Authorization': 'Bearer ' + SLACK_BOT_TOKEN, 'Content-Type': 'application/json' } });
-        console.log('Post-eval conversions Slack message posted');
-      } catch (dealsErr) {
-        console.error('Deals board post-eval Slack failed:', dealsErr.message);
-      }
-
-      // Log to Redis for daily digest
-      await logEventToRedis({
-        type: 'Evaluation',
-        contact: patientFullName + ' ' + patient_phone,
-        summary: outcome + ' — PT: ' + evaluating_pt + ' — ' + (claudeResult.next_steps || 'No next steps')
-      });
+      // Jordan email — includes coaching notes
+      await axios.post(EVAL_JORDAN_WEBHOOK, {
+        email_body: evalEmailContent.jordan_email_html || '',
+        slack_message: evalEmailContent.slack_message || '',
+        contact_name: String(patientFullName || ''),
+        contact_id: String(contact.id || '')
+      }, { headers: { 'Content-Type': 'application/json' } });
+      console.log('Jordan eval webhook fired');
 
     } catch (emailErr) {
-      console.error('Eval email/Slack failed:', emailErr.response?.data ? JSON.stringify(emailErr.response.data) : emailErr.message || String(emailErr));
+      console.error('Failed to generate eval email content:', emailErr.message);
     }
 
     res.status(200).json({ success: true, outcome, pending_subtype: claudeResult.pending_subtype });
 
   } catch (error) {
-    const errMsg = error.response?.data ? JSON.stringify(error.response.data) : error.message;
-    console.error('Post-eval processing error:', errMsg);
-    const patientName = (req.body.patient_first_name || '') + ' ' + (req.body.patient_last_name || '');
-    await sendSlackError(
-      'Post-Eval Form Failed — ' + patientName.trim() + ' (PT: ' + (req.body.evaluating_pt || 'Unknown') + ')',
-      errMsg + ' — Manual GHL update required. Check Railway logs.'
-    );
+    console.error('Post-eval processing error:', error.response?.data || error.message);
+
+    // Error notification to Jordan
+    try {
+      await axios.post(EVAL_JORDAN_WEBHOOK, {
+        contact_name: req.body.patient_first_name + ' ' + req.body.patient_last_name || 'Unknown',
+        contact_phone: req.body.patient_phone || 'Unknown',
+        evaluating_pt: req.body.evaluating_pt || 'Unknown',
+        outcome: 'ERROR — Form submission failed',
+        stage: 'N/A',
+        payment_method: 'N/A',
+        evaluation_summary: 'The post-eval form failed to process. Manual GHL update required.',
+        next_steps: 'Check Railway logs immediately and update GHL manually.',
+        red_flags: 'SYSTEM ERROR: ' + (error.message || 'Unknown error'),
+        calendar_appointment_created: 'N/A',
+        continuity_opportunity_created: 'N/A',
+        rehab_essentials: 'N/A',
+        checkin_text_scheduled: 'N/A',
+        send_checkin_text: 'N/A',
+        checkin_text: '',
+        objection_category: '',
+        objection_detail: '',
+        physician_name: '',
+        physician_office: '',
+        coaching_notes: 'No coaching notes — form processing failed before analysis completed.'
+      }, { headers: { 'Content-Type': 'application/json' } });
+    } catch (notifyErr) {
+      console.error('Failed to send error notification:', notifyErr.message);
+    }
+
     res.status(500).json({ error: error.message });
   }
 });
