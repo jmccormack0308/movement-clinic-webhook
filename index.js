@@ -1115,14 +1115,15 @@ app.get('/briefing', (req, res) => {
 <title>Daily Briefing</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e2e8f0; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
+  body { font-family: 'Montserrat', sans-serif; background: #232323; color: #F7F8FA; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
   .lock { text-align: center; padding: 40px 24px; }
-  .lock h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; color: #f1f5f9; }
-  .lock p { font-size: 14px; color: #64748b; margin-bottom: 28px; }
-  .lock input { width: 180px; padding: 12px 16px; border-radius: 10px; border: 1px solid #334155; background: #1e2536; color: #f1f5f9; font-size: 18px; text-align: center; letter-spacing: 6px; outline: none; }
-  .lock input:focus { border-color: #3b82f6; }
-  .lock button { display: block; margin: 16px auto 0; padding: 11px 32px; background: #3b82f6; color: #fff; border: none; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; }
-  .lock button:hover { background: #2563eb; }
+  .lock h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: #F7F8FA; letter-spacing: 0.5px; }
+  .lock p { font-size: 13px; color: #888; margin-bottom: 28px; font-weight: 500; }
+  .lock input { width: 180px; padding: 12px 16px; border-radius: 10px; border: 1px solid #444; background: #1a1a1a; color: #F7F8FA; font-size: 18px; text-align: center; letter-spacing: 6px; outline: none; font-family: 'Montserrat', sans-serif; }
+  .lock input:focus { border-color: #FFD70A; }
+  .lock button { display: block; margin: 16px auto 0; padding: 11px 32px; background: #FFD70A; color: #232323; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Montserrat', sans-serif; letter-spacing: 0.5px; }
+  .lock button:hover { background: #e6c400; }
   .err { color: #ef4444; font-size: 13px; margin-top: 12px; min-height: 18px; }
 </style>
 </head>
@@ -1268,21 +1269,24 @@ app.get('/briefing', (req, res) => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Daily Briefing — ${esc(dateStr)}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0f1117;
-    color: #e2e8f0;
+    font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #232323;
+    color: #F7F8FA;
     min-height: 100vh;
     padding: 0 0 60px;
   }
 
   /* ── Top bar ── */
   .topbar {
-    background: #161b27;
-    border-bottom: 1px solid #1e2a3a;
+    background: #1a1a1a;
+    border-bottom: 3px solid #FFD70A;
     padding: 16px 24px;
     display: flex;
     align-items: center;
@@ -1291,32 +1295,34 @@ app.get('/briefing', (req, res) => {
     top: 0;
     z-index: 100;
   }
-  .topbar-left h1 { font-size: 17px; font-weight: 700; color: #f1f5f9; }
-  .topbar-left p  { font-size: 12px; color: #475569; margin-top: 2px; }
+  .topbar-left h1 { font-size: 17px; font-weight: 700; color: #F7F8FA; letter-spacing: 0.5px; }
+  .topbar-left p  { font-size: 11px; color: #888; margin-top: 3px; font-weight: 500; }
   .topbar-right   { display: flex; gap: 10px; align-items: center; }
   .expand-all, .collapse-all {
-    font-size: 12px; color: #64748b; background: none; border: 1px solid #334155;
-    padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    font-size: 11px; font-weight: 600; color: #888; background: none;
+    border: 1px solid #444; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    font-family: 'Montserrat', sans-serif; letter-spacing: 0.3px;
   }
-  .expand-all:hover, .collapse-all:hover { color: #94a3b8; border-color: #475569; }
+  .expand-all:hover, .collapse-all:hover { color: #FFD70A; border-color: #FFD70A; }
 
   /* ── Summary banner ── */
   .summary-banner {
-    background: #1a2234;
-    border-left: 4px solid #3b82f6;
+    background: #1a1a1a;
+    border-left: 4px solid #0065a3;
     margin: 20px 20px 0;
     padding: 14px 18px;
     border-radius: 0 8px 8px 0;
-    font-size: 14px;
-    line-height: 1.6;
-    color: #94a3b8;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #aaa;
+    font-weight: 500;
   }
 
   /* ── Sections ── */
   .section {
-    margin: 16px 20px 0;
-    background: #161b27;
-    border: 1px solid #1e2a3a;
+    margin: 14px 16px 0;
+    background: #1a1a1a;
+    border: 1px solid #333;
     border-radius: 12px;
     overflow: hidden;
   }
@@ -1325,29 +1331,29 @@ app.get('/briefing', (req, res) => {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 18px;
+    padding: 13px 18px;
     cursor: pointer;
     list-style: none;
     user-select: none;
   }
   .section-summary::-webkit-details-marker { display: none; }
-  .section-summary:hover { background: #1a2234; }
+  .section-summary:hover { background: #222; }
 
   .section-title {
-    font-size: 13px;
+    font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.8px;
-    color: #64748b;
+    letter-spacing: 1px;
+    color: #888;
     display: flex;
     align-items: center;
     gap: 8px;
   }
 
   .section-count {
-    background: #1e3a5f;
-    color: #60a5fa;
-    font-size: 11px;
+    background: #0065a3;
+    color: #F7F8FA;
+    font-size: 10px;
     font-weight: 700;
     padding: 2px 8px;
     border-radius: 20px;
@@ -1356,26 +1362,27 @@ app.get('/briefing', (req, res) => {
   }
 
   .chevron {
-    color: #475569;
-    font-size: 16px;
+    color: #555;
+    font-size: 14px;
     transition: transform 0.2s;
   }
   details[open] .chevron { transform: rotate(180deg); }
 
-  .section-body { padding: 4px 14px 14px; }
+  .section-body { padding: 4px 12px 12px; }
 
   /* ── Cards ── */
   .card {
-    background: #1a2234;
-    border: 1px solid #243044;
+    background: #232323;
+    border: 1px solid #333;
     border-radius: 10px;
-    padding: 13px 15px;
-    margin-top: 10px;
+    padding: 13px 14px;
+    margin-top: 8px;
     border-left-width: 3px;
+    border-left-color: #333;
   }
   .urgency-high { border-left-color: #ef4444; }
-  .urgency-med  { border-left-color: #f59e0b; }
-  .urgency-low  { border-left-color: #243044; }
+  .urgency-med  { border-left-color: #FFD70A; }
+  .urgency-low  { border-left-color: #333; }
 
   .card-header {
     display: flex;
@@ -1392,20 +1399,21 @@ app.get('/briefing', (req, res) => {
     min-width: 0;
   }
   .card-title {
-    color: #e2e8f0;
+    color: #F7F8FA;
     text-decoration: none;
-    font-size: 14px;
-    font-weight: 500;
+    font-size: 13px;
+    font-weight: 600;
     line-height: 1.4;
     word-break: break-word;
   }
-  .card-title:hover { color: #60a5fa; text-decoration: underline; }
+  .card-title:hover { color: #FFD70A; text-decoration: underline; }
 
   .card-why {
-    font-size: 12px;
-    color: #64748b;
-    margin-top: 7px;
+    font-size: 11px;
+    color: #777;
+    margin-top: 6px;
     line-height: 1.5;
+    font-weight: 500;
   }
 
   .card-actions {
@@ -1418,7 +1426,7 @@ app.get('/briefing', (req, res) => {
 
   /* ── Badges ── */
   .badge {
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
     padding: 2px 7px;
     border-radius: 4px;
@@ -1426,16 +1434,16 @@ app.get('/briefing', (req, res) => {
     flex-shrink: 0;
     margin-top: 2px;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.8px;
   }
-  .badge-task  { background: #1e3a5f; color: #60a5fa; }
-  .badge-email { background: #2d1f3f; color: #a78bfa; }
+  .badge-task  { background: #0065a3; color: #F7F8FA; }
+  .badge-email { background: #333; color: #FFD70A; border: 1px solid #FFD70A44; }
 
   /* ── Buttons ── */
   .btn {
-    font-size: 12px;
-    font-weight: 600;
-    padding: 5px 12px;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 5px 11px;
     border-radius: 7px;
     border: none;
     cursor: pointer;
@@ -1443,46 +1451,49 @@ app.get('/briefing', (req, res) => {
     text-decoration: none;
     display: inline-block;
     line-height: 1.4;
+    font-family: 'Montserrat', sans-serif;
+    letter-spacing: 0.3px;
   }
   .btn-done {
-    background: #14532d;
-    color: #86efac;
-    border: 1px solid #166534;
+    background: #1a3a1a;
+    color: #4ade80;
+    border: 1px solid #2d5a2d;
   }
-  .btn-done:hover { background: #166534; }
-  .btn-done.done  { background: #0f2e1a; color: #4ade80; cursor: default; opacity: 0.7; }
-  .btn-done.loading { opacity: 0.5; cursor: wait; }
+  .btn-done:hover { background: #2d5a2d; }
+  .btn-done.done  { background: #111; color: #4ade80; cursor: default; opacity: 0.6; }
+  .btn-done.loading { opacity: 0.4; cursor: wait; }
 
   .btn-draft {
-    background: #1e1b4b;
-    color: #a5b4fc;
-    border: 1px solid #312e81;
+    background: #003d63;
+    color: #F7F8FA;
+    border: 1px solid #0065a3;
   }
-  .btn-draft:hover { background: #312e81; }
+  .btn-draft:hover { background: #0065a3; }
 
   .btn-draft-alt {
-    background: #1f1f1f;
-    color: #94a3b8;
-    border: 1px solid #334155;
+    background: #2a2a2a;
+    color: #aaa;
+    border: 1px solid #444;
   }
-  .btn-draft-alt:hover { background: #334155; }
+  .btn-draft-alt:hover { background: #333; }
 
   /* ── Empty state ── */
   .empty {
-    font-size: 13px;
-    color: #334155;
+    font-size: 12px;
+    color: #444;
     padding: 12px 4px;
     font-style: italic;
+    font-weight: 500;
   }
 
   /* ── No data state ── */
   .no-data {
     text-align: center;
     padding: 80px 24px;
-    color: #475569;
+    color: #555;
   }
-  .no-data h2 { font-size: 18px; margin-bottom: 8px; }
-  .no-data p  { font-size: 14px; }
+  .no-data h2 { font-size: 18px; margin-bottom: 8px; color: #888; font-weight: 700; }
+  .no-data p  { font-size: 13px; font-weight: 500; }
 </style>
 </head>
 <body>
