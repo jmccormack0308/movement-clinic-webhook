@@ -1103,6 +1103,142 @@ app.post('/mark-done', async (req, res) => {
   }
 });
 
+// ── Push task to admin ──
+app.post('/push-to-admin', async (req, res) => {
+  const pin = req.headers['x-briefing-pin'] || req.body?.pin;
+  if (pin !== BRIEFING_PIN) return res.status(403).json({ error: 'Forbidden' });
+
+  const { title, notes, notionUrl, contactName, contactPhone } = req.body;
+  if (!title) return res.status(400).json({ error: 'Missing title' });
+
+  const results = { ghlTask: null, email: null, errors: [] };
+
+  // ── 1. Create GHL task ────────────────────────────────────────────────────
+  try {
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + 2); // default due in 2 days
+
+    if (contactPhone) {
+      // Try to find a GHL contact and create a contact-linked task
+      try {
+        const cleanPhone = contactPhone.replace(/\D/g, '');
+        const contactRes = await axios.get(
+          `https://services.leadconnectorhq.com/contacts/?locationId=${GHL_LOCATION_ID}&query=${cleanPhone}`,
+          { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28' } }
+        );
+        const contact = contactRes.data.contacts?.[0];
+        if (contact) {
+          await axios.post(
+            `https://services.leadconnectorhq.com/contacts/${contact.id}/tasks`,
+            {
+              title,
+              body: notes || '',
+              dueDate: dueDate.toISOString(),
+              completed: false,
+              assignedTo: TASK_ASSIGNEE_ID,
+            },
+            { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
+          );
+          results.ghlTask = `Linked to contact: ${contact.firstName || contactName || contactPhone}`;
+        } else {
+          throw new Error('Contact not found');
+        }
+      } catch {
+        // Fall through to standalone task
+        await axios.post(
+          `https://services.leadconnectorhq.com/contacts/${GHL_LOCATION_ID}/tasks`,
+          {
+            title,
+            body: notes || '',
+            dueDate: dueDate.toISOString(),
+            completed: false,
+            assignedTo: TASK_ASSIGNEE_ID,
+          },
+          { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28', 'Content-Type': 'application/json' } }
+        ).catch(() => null);
+        results.ghlTask = 'Standalone task created';
+      }
+    } else {
+      // No contact — create standalone GHL task via location
+      // GHL doesn't have a true "standalone task" endpoint; use a dummy contact approach
+      // Instead we'll note it in the email and skip GHL task for non-contact items
+      results.ghlTask = 'No contact — task noted in email only';
+    }
+  } catch (err) {
+    results.errors.push('GHL task: ' + err.message);
+  }
+
+  // ── 2. Send admin email via GHL webhook ───────────────────────────────────
+  try {
+    const ADMIN_EMAIL = 'info@movementclinicpt.com';
+    const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+    const emailHtml = `
+<div style="font-family:'Montserrat','Segoe UI',Arial,sans-serif;max-width:600px;margin:0 auto;background:#F7F8FA;">
+  <div style="background:#232323;padding:20px 24px;border-bottom:3px solid #FFD70A;">
+    <p style="color:#F7F8FA;font-size:13px;font-weight:700;margin:0;letter-spacing:0.5px;">MOVEMENT CLINIC · ADMIN TASK</p>
+  </div>
+  <div style="padding:24px;">
+    <h2 style="font-size:18px;font-weight:700;color:#232323;margin:0 0 16px;">${title.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</h2>
+    ${contactName ? `<p style="font-size:13px;color:#6b7280;margin:0 0 8px;"><strong>Related to:</strong> ${contactName.replace(/</g,'&lt;')}</p>` : ''}
+    ${notes ? `
+    <div style="background:#fff;border:1px solid #e5e7eb;border-left:4px solid #0065a3;border-radius:0 8px 8px 0;padding:14px 16px;margin:16px 0;">
+      <p style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6b7280;margin:0 0 8px;">Notes from Jordan</p>
+      <p style="font-size:14px;color:#232323;line-height:1.6;margin:0;">${notes.replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')}</p>
+    </div>` : ''}
+    ${notionUrl ? `<p style="margin:16px 0 0;"><a href="${notionUrl}" style="display:inline-block;background:#232323;color:#F7F8FA;padding:9px 18px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700;letter-spacing:0.5px;">Open in Notion →</a></p>` : ''}
+    <p style="font-size:11px;color:#9ca3af;margin:24px 0 0;border-top:1px solid #e5e7eb;padding-top:16px;">Assigned ${today} · Movement Clinic Daily Briefing</p>
+  </div>
+</div>`;
+
+    // Use GHL summary webhook to send email if available, otherwise log
+    if (process.env.GHL_SUMMARY_WEBHOOK) {
+      await axios.post(process.env.GHL_SUMMARY_WEBHOOK, {
+        to_email: ADMIN_EMAIL,
+        subject: `Admin Task: ${title}`,
+        email_body: emailHtml,
+        contact_name: contactName || 'General Task',
+      }, { headers: { 'Content-Type': 'application/json' } }).catch(e => results.errors.push('Webhook: ' + e.message));
+    }
+
+    // Also send directly via Gmail if service account available
+    try {
+      const { google } = require('googleapis');
+      const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+      if (SERVICE_ACCOUNT_JSON.client_email) {
+        const auth = new google.auth.JWT({
+          email: SERVICE_ACCOUNT_JSON.client_email,
+          key: SERVICE_ACCOUNT_JSON.private_key,
+          scopes: ['https://www.googleapis.com/auth/gmail.compose'],
+          subject: process.env.GMAIL_USER,
+        });
+        await auth.authorize();
+        const gmail = google.gmail({ version: 'v1', auth });
+        const subject = `Admin Task: ${title}`;
+        const messageParts = [
+          `From: ${process.env.GMAIL_USER}`,
+          `To: ${ADMIN_EMAIL}`,
+          `Subject: ${subject}`,
+          'Content-Type: text/html; charset=utf-8',
+          'MIME-Version: 1.0',
+          '',
+          emailHtml,
+        ];
+        const raw = Buffer.from(messageParts.join('\n')).toString('base64')
+          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        await gmail.users.messages.send({ userId: 'me', requestBody: { raw } });
+        results.email = `Sent to ${ADMIN_EMAIL}`;
+      }
+    } catch (emailErr) {
+      results.errors.push('Gmail: ' + emailErr.message);
+    }
+  } catch (err) {
+    results.errors.push('Email: ' + err.message);
+  }
+
+  res.json({ ok: true, results });
+});
+
 // ── Briefing landing page ──
 app.get('/briefing', (req, res) => {
   const { pin } = req.query;
@@ -1116,14 +1252,14 @@ app.get('/briefing', (req, res) => {
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap');
-  body { font-family: 'Montserrat', sans-serif; background: #232323; color: #F7F8FA; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+  body { font-family: 'Montserrat', sans-serif; background: #F7F8FA; color: #232323; min-height: 100vh; display: flex; align-items: center; justify-content: center; }
   .lock { text-align: center; padding: 40px 24px; }
-  .lock h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: #F7F8FA; letter-spacing: 0.5px; }
-  .lock p { font-size: 13px; color: #888; margin-bottom: 28px; font-weight: 500; }
-  .lock input { width: 180px; padding: 12px 16px; border-radius: 10px; border: 1px solid #444; background: #1a1a1a; color: #F7F8FA; font-size: 18px; text-align: center; letter-spacing: 6px; outline: none; font-family: 'Montserrat', sans-serif; }
-  .lock input:focus { border-color: #FFD70A; }
-  .lock button { display: block; margin: 16px auto 0; padding: 11px 32px; background: #FFD70A; color: #232323; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Montserrat', sans-serif; letter-spacing: 0.5px; }
-  .lock button:hover { background: #e6c400; }
+  .lock h1 { font-size: 22px; font-weight: 700; margin-bottom: 6px; color: #232323; letter-spacing: 0.5px; }
+  .lock p { font-size: 13px; color: #6b7280; margin-bottom: 28px; font-weight: 500; }
+  .lock input { width: 180px; padding: 12px 16px; border-radius: 10px; border: 1px solid #d1d5db; background: #fff; color: #232323; font-size: 18px; text-align: center; letter-spacing: 6px; outline: none; font-family: 'Montserrat', sans-serif; }
+  .lock input:focus { border-color: #0065a3; box-shadow: 0 0 0 3px rgba(0,101,163,0.1); }
+  .lock button { display: block; margin: 16px auto 0; padding: 11px 32px; background: #232323; color: #F7F8FA; border: none; border-radius: 10px; font-size: 14px; font-weight: 700; cursor: pointer; font-family: 'Montserrat', sans-serif; letter-spacing: 0.5px; }
+  .lock button:hover { background: #0065a3; }
   .err { color: #ef4444; font-size: 13px; margin-top: 12px; min-height: 18px; }
 </style>
 </head>
@@ -1170,6 +1306,7 @@ app.get('/briefing', (req, res) => {
   const upcomingTasks     = a.upcoming_deadlines || [];
   const overdueItems      = a.overdue_items || [];
   const delegateItems     = a.delegate_to_admin || [];
+  const calendarEvents    = a.calendar_events || [];
   const staleItems        = a.stale_tasks || a.stale_items || [];
   const overallSummary    = a.overall_summary || '';
 
@@ -1204,6 +1341,18 @@ app.get('/briefing', (req, res) => {
   function markDoneBtn(notionId, title) {
     if (!notionId) return '';
     return `<button class="btn btn-done" onclick="markDone(this,'${esc(notionId)}','${esc(title).replace(/'/g,"\\'")}')">✓ Mark Done</button>`;
+  }
+
+  function pushToAdminBtn(item) {
+    const payload = {
+      title: item.title || '',
+      notionUrl: item.url || '',
+      contactName: item.contact_name || '',
+      contactPhone: item.contact_phone || '',
+      suggestedNotes: item.suggested_notes || item.reason || '',
+    };
+    const encoded = encodeURIComponent(JSON.stringify(payload));
+    return `<button class="btn btn-admin" onclick="openAdminModal(this,JSON.parse(decodeURIComponent('${encoded}')))">→ Push to Admin</button>`;
   }
 
   function renderItems(items, emptyMsg) {
@@ -1250,6 +1399,41 @@ app.get('/briefing', (req, res) => {
       </div>`).join('');
   }
 
+  function renderDelegateItems(items, emptyMsg) {
+    if (!items || items.length === 0) return `<p class="empty">${emptyMsg}</p>`;
+    return items.map(item => `
+      <div class="card" id="card-${esc(item.notion_id || item.message_id || Math.random())}">
+        <div class="card-header">
+          <div class="card-left">
+            ${taskBadge(item)}
+            <a class="card-title" href="${esc(item.url)}" target="_blank">${esc(item.title || 'Item')}</a>
+          </div>
+          <div class="card-actions">
+            ${markDoneBtn(item.notion_id, item.title)}
+            ${pushToAdminBtn(item)}
+          </div>
+        </div>
+        ${item.reason ? `<p class="card-why">🕰 ${esc(item.reason)}</p>` : ''}
+        ${item.suggested_notes ? `<p class="card-why">💬 ${esc(item.suggested_notes)}</p>` : ''}
+        ${item.contact_name ? `<p class="card-why">👤 ${esc(item.contact_name)}</p>` : ''}
+      </div>`).join('');
+  }
+
+  function renderCalendarEvents(items, emptyMsg) {
+    if (!items || items.length === 0) return `<p class="empty">${emptyMsg}</p>`;
+    return items.map(item => `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-left">
+            <span class="badge badge-event">Event</span>
+            <a class="card-title" href="${esc(item.url || '#')}" target="_blank">${esc(item.title || item.name || 'Event')}</a>
+          </div>
+        </div>
+        ${item.date || item.eventDate ? `<p class="card-why">📅 ${esc(item.date || item.eventDate)}</p>` : ''}
+        ${item.description ? `<p class="card-why">${esc(item.description)}</p>` : ''}
+      </div>`).join('');
+  }
+
   function section(id, title, count, content, startOpen = true) {
     const openAttr = startOpen ? 'open' : '';
     const countBadge = count > 0 ? `<span class="section-count">${count}</span>` : '';
@@ -1277,15 +1461,15 @@ app.get('/briefing', (req, res) => {
 
   body {
     font-family: 'Montserrat', -apple-system, BlinkMacSystemFont, sans-serif;
-    background: #232323;
-    color: #F7F8FA;
+    background: #F7F8FA;
+    color: #232323;
     min-height: 100vh;
     padding: 0 0 60px;
   }
 
   /* ── Top bar ── */
   .topbar {
-    background: #1a1a1a;
+    background: #232323;
     border-bottom: 3px solid #FFD70A;
     padding: 16px 24px;
     display: flex;
@@ -1296,35 +1480,37 @@ app.get('/briefing', (req, res) => {
     z-index: 100;
   }
   .topbar-left h1 { font-size: 17px; font-weight: 700; color: #F7F8FA; letter-spacing: 0.5px; }
-  .topbar-left p  { font-size: 11px; color: #888; margin-top: 3px; font-weight: 500; }
+  .topbar-left p  { font-size: 11px; color: #aaa; margin-top: 3px; font-weight: 500; }
   .topbar-right   { display: flex; gap: 10px; align-items: center; }
   .expand-all, .collapse-all {
-    font-size: 11px; font-weight: 600; color: #888; background: none;
-    border: 1px solid #444; padding: 5px 12px; border-radius: 6px; cursor: pointer;
+    font-size: 11px; font-weight: 600; color: #aaa; background: none;
+    border: 1px solid #555; padding: 5px 12px; border-radius: 6px; cursor: pointer;
     font-family: 'Montserrat', sans-serif; letter-spacing: 0.3px;
   }
   .expand-all:hover, .collapse-all:hover { color: #FFD70A; border-color: #FFD70A; }
 
   /* ── Summary banner ── */
   .summary-banner {
-    background: #1a1a1a;
+    background: #fff;
     border-left: 4px solid #0065a3;
-    margin: 20px 20px 0;
+    margin: 20px 16px 0;
     padding: 14px 18px;
     border-radius: 0 8px 8px 0;
     font-size: 13px;
     line-height: 1.7;
-    color: #aaa;
+    color: #555;
     font-weight: 500;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
   }
 
   /* ── Sections ── */
   .section {
     margin: 14px 16px 0;
-    background: #1a1a1a;
-    border: 1px solid #333;
+    background: #fff;
+    border: 1px solid #e5e7eb;
     border-radius: 12px;
     overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05);
   }
 
   .section-summary {
@@ -1337,14 +1523,14 @@ app.get('/briefing', (req, res) => {
     user-select: none;
   }
   .section-summary::-webkit-details-marker { display: none; }
-  .section-summary:hover { background: #222; }
+  .section-summary:hover { background: #f9fafb; }
 
   .section-title {
     font-size: 11px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 1px;
-    color: #888;
+    color: #6b7280;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -1352,7 +1538,7 @@ app.get('/briefing', (req, res) => {
 
   .section-count {
     background: #0065a3;
-    color: #F7F8FA;
+    color: #fff;
     font-size: 10px;
     font-weight: 700;
     padding: 2px 8px;
@@ -1362,7 +1548,7 @@ app.get('/briefing', (req, res) => {
   }
 
   .chevron {
-    color: #555;
+    color: #9ca3af;
     font-size: 14px;
     transition: transform 0.2s;
   }
@@ -1372,17 +1558,17 @@ app.get('/briefing', (req, res) => {
 
   /* ── Cards ── */
   .card {
-    background: #232323;
-    border: 1px solid #333;
+    background: #F7F8FA;
+    border: 1px solid #e5e7eb;
     border-radius: 10px;
     padding: 13px 14px;
     margin-top: 8px;
     border-left-width: 3px;
-    border-left-color: #333;
+    border-left-color: #e5e7eb;
   }
   .urgency-high { border-left-color: #ef4444; }
   .urgency-med  { border-left-color: #FFD70A; }
-  .urgency-low  { border-left-color: #333; }
+  .urgency-low  { border-left-color: #e5e7eb; }
 
   .card-header {
     display: flex;
@@ -1399,18 +1585,18 @@ app.get('/briefing', (req, res) => {
     min-width: 0;
   }
   .card-title {
-    color: #F7F8FA;
+    color: #232323;
     text-decoration: none;
     font-size: 13px;
     font-weight: 600;
     line-height: 1.4;
     word-break: break-word;
   }
-  .card-title:hover { color: #FFD70A; text-decoration: underline; }
+  .card-title:hover { color: #0065a3; text-decoration: underline; }
 
   .card-why {
     font-size: 11px;
-    color: #777;
+    color: #6b7280;
     margin-top: 6px;
     line-height: 1.5;
     font-weight: 500;
@@ -1436,8 +1622,9 @@ app.get('/briefing', (req, res) => {
     text-transform: uppercase;
     letter-spacing: 0.8px;
   }
-  .badge-task  { background: #0065a3; color: #F7F8FA; }
-  .badge-email { background: #333; color: #FFD70A; border: 1px solid #FFD70A44; }
+  .badge-task  { background: #0065a3; color: #fff; }
+  .badge-email { background: #232323; color: #FFD70A; }
+  .badge-event { background: #FFD70A; color: #232323; }
 
   /* ── Buttons ── */
   .btn {
@@ -1455,44 +1642,97 @@ app.get('/briefing', (req, res) => {
     letter-spacing: 0.3px;
   }
   .btn-done {
-    background: #1a3a1a;
-    color: #4ade80;
-    border: 1px solid #2d5a2d;
+    background: #dcfce7;
+    color: #166534;
+    border: 1px solid #bbf7d0;
   }
-  .btn-done:hover { background: #2d5a2d; }
-  .btn-done.done  { background: #111; color: #4ade80; cursor: default; opacity: 0.6; }
+  .btn-done:hover { background: #bbf7d0; }
+  .btn-done.done  { background: #f0fdf4; color: #4ade80; cursor: default; opacity: 0.7; }
   .btn-done.loading { opacity: 0.4; cursor: wait; }
 
   .btn-draft {
-    background: #003d63;
-    color: #F7F8FA;
-    border: 1px solid #0065a3;
+    background: #e0f0fa;
+    color: #0065a3;
+    border: 1px solid #bfdbee;
   }
-  .btn-draft:hover { background: #0065a3; }
+  .btn-draft:hover { background: #bfdbee; }
 
   .btn-draft-alt {
-    background: #2a2a2a;
-    color: #aaa;
-    border: 1px solid #444;
+    background: #f3f4f6;
+    color: #6b7280;
+    border: 1px solid #d1d5db;
   }
-  .btn-draft-alt:hover { background: #333; }
+  .btn-draft-alt:hover { background: #e5e7eb; }
 
   /* ── Empty state ── */
   .empty {
     font-size: 12px;
-    color: #444;
+    color: #9ca3af;
     padding: 12px 4px;
     font-style: italic;
     font-weight: 500;
   }
 
+  /* ── Push to Admin button ── */
+  .btn-admin {
+    background: #FFF8E1;
+    color: #92400e;
+    border: 1px solid #FFD70A;
+  }
+  .btn-admin:hover { background: #FFD70A; color: #232323; }
+  .btn-admin.loading { opacity: 0.4; cursor: wait; }
+  .btn-admin.sent { background: #dcfce7; color: #166534; border-color: #bbf7d0; cursor: default; }
+
+  /* ── Modal ── */
+  .modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .modal-overlay.active { display: flex; }
+  .modal {
+    background: #fff;
+    border-radius: 14px;
+    padding: 24px;
+    width: 100%;
+    max-width: 480px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+  }
+  .modal h3 { font-size: 15px; font-weight: 700; color: #232323; margin: 0 0 4px; }
+  .modal .modal-subtitle { font-size: 12px; color: #6b7280; margin: 0 0 16px; font-weight: 500; }
+  .modal textarea {
+    width: 100%;
+    min-height: 100px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 13px;
+    font-family: 'Montserrat', sans-serif;
+    color: #232323;
+    resize: vertical;
+    outline: none;
+    line-height: 1.5;
+  }
+  .modal textarea:focus { border-color: #0065a3; box-shadow: 0 0 0 3px rgba(0,101,163,0.1); }
+  .modal-actions { display: flex; gap: 8px; margin-top: 14px; justify-content: flex-end; }
+  .modal-cancel { background: #f3f4f6; color: #6b7280; border: 1px solid #d1d5db; }
+  .modal-cancel:hover { background: #e5e7eb; }
+  .modal-confirm { background: #232323; color: #F7F8FA; border: none; }
+  .modal-confirm:hover { background: #0065a3; }
+  .modal-status { font-size: 12px; margin-top: 10px; min-height: 16px; color: #6b7280; font-weight: 500; }
+
   /* ── No data state ── */
   .no-data {
     text-align: center;
     padding: 80px 24px;
-    color: #555;
+    color: #6b7280;
   }
-  .no-data h2 { font-size: 18px; margin-bottom: 8px; color: #888; font-weight: 700; }
+  .no-data h2 { font-size: 18px; margin-bottom: 8px; color: #232323; font-weight: 700; }
   .no-data p  { font-size: 13px; font-weight: 500; }
 </style>
 </head>
@@ -1523,18 +1763,36 @@ ${section('emails', '📧 Emails Needing Response', emailsNeedReply.length,
     renderItems(emailsNeedReply, 'No emails flagged for response.'), true)}
 
 ${section('delegate', '👤 Delegate to Admin', delegateItems.length,
-    renderSimpleItems(delegateItems, 'Nothing to delegate.'), false)}
+    renderDelegateItems(delegateItems, 'Nothing to delegate.'), false)}
 
-${section('upcoming', '📅 Upcoming Deadlines', upcomingTasks.length,
-    renderSimpleItems(upcomingTasks, 'No upcoming deadlines in the next 7 days.'), false)}
+${section('calendar', '📆 Upcoming Events', calendarEvents.length,
+    renderCalendarEvents(calendarEvents, 'No upcoming events in the next 21 days.'), false)}
+
+${section('upcoming', '📅 Task Deadlines', upcomingTasks.length,
+    renderSimpleItems(upcomingTasks, 'No task deadlines in the next 21 days.'), false)}
 
 ${section('stale', '🕰 Stale / No Due Date', staleItems.length,
     renderSimpleItems(staleItems, 'Nothing stale.'), false)}
 
 `}
 
+<!-- Push to Admin Modal -->
+<div class="modal-overlay" id="adminModal">
+  <div class="modal">
+    <h3 id="modalTitle">Push to Admin</h3>
+    <p class="modal-subtitle" id="modalSubtitle"></p>
+    <textarea id="modalNotes" placeholder="Notes for admin..."></textarea>
+    <div class="modal-status" id="modalStatus"></div>
+    <div class="modal-actions">
+      <button class="btn modal-cancel" onclick="closeModal()">Cancel</button>
+      <button class="btn modal-confirm" onclick="confirmPush()">Send to Admin</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const PIN = '${esc(BRIEFING_PIN)}';
+  let _modalData = {};
 
   function toggleAll(open) {
     document.querySelectorAll('details.section').forEach(d => d.open = open);
@@ -1552,8 +1810,6 @@ ${section('stale', '🕰 Stale / No Due Date', staleItems.length,
         body: JSON.stringify({ notionId }),
       });
       if (!res.ok) throw new Error('Server error');
-
-      // Fade and remove the card
       const card = btn.closest('.card');
       card.style.transition = 'opacity 0.4s, transform 0.4s';
       card.style.opacity = '0';
@@ -1563,6 +1819,64 @@ ${section('stale', '🕰 Stale / No Due Date', staleItems.length,
       btn.classList.remove('loading');
       btn.textContent = '✓ Mark Done';
       alert('Failed to mark done: ' + err.message);
+    }
+  }
+
+  function openAdminModal(btn, data) {
+    _modalData = { ...data, btn };
+    document.getElementById('modalTitle').textContent = data.title || 'Push to Admin';
+    document.getElementById('modalSubtitle').textContent = data.contactName
+      ? 'Contact: ' + data.contactName
+      : 'No contact associated';
+    document.getElementById('modalNotes').value = data.suggestedNotes || '';
+    document.getElementById('modalStatus').textContent = '';
+    document.getElementById('adminModal').classList.add('active');
+    setTimeout(() => document.getElementById('modalNotes').focus(), 50);
+  }
+
+  function closeModal() {
+    document.getElementById('adminModal').classList.remove('active');
+    _modalData = {};
+  }
+
+  document.getElementById('adminModal').addEventListener('click', e => {
+    if (e.target === document.getElementById('adminModal')) closeModal();
+  });
+
+  async function confirmPush() {
+    const notes = document.getElementById('modalNotes').value.trim();
+    const status = document.getElementById('modalStatus');
+    const confirmBtn = document.querySelector('.modal-confirm');
+    confirmBtn.textContent = 'Sending…';
+    confirmBtn.disabled = true;
+    status.textContent = '';
+
+    try {
+      const res = await fetch('/push-to-admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-briefing-pin': PIN },
+        body: JSON.stringify({
+          title: _modalData.title,
+          notes,
+          notionUrl: _modalData.notionUrl,
+          contactName: _modalData.contactName || null,
+          contactPhone: _modalData.contactPhone || null,
+        }),
+      });
+      if (!res.ok) throw new Error('Server error');
+      const data = await res.json();
+
+      // Mark the button as sent
+      if (_modalData.btn) {
+        _modalData.btn.textContent = '✓ Sent';
+        _modalData.btn.classList.add('sent');
+        _modalData.btn.disabled = true;
+      }
+      closeModal();
+    } catch (err) {
+      status.textContent = 'Failed: ' + err.message;
+      confirmBtn.textContent = 'Send to Admin';
+      confirmBtn.disabled = false;
     }
   }
 </script>
