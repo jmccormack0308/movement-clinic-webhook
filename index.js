@@ -12,6 +12,64 @@ const GHL_LOCATION_ID = '6oqyEZ6nlqPw4cDsaKzi';
 const GHL_SUMMARY_WEBHOOK = process.env.GHL_SUMMARY_WEBHOOK;
 const TASK_ASSIGNEE_ID = '3EuCG6xznkq3A2CeDhDQ';
 const TASK_TITLE = 'Claude Assistant: Follow up from previous conversation thread';
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
+const PIPELINE_MANAGER_CHANNEL = 'C0ASJSMT76Y';
+
+// In-memory guard: tracks contacts that already had their stage advanced today.
+// Resets on server restart/redeploy — sufficient for call volume.
+const stageAdvancedToday = new Map();
+
+function hasAdvancedTodayAlready(contactId) {
+  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD in UTC
+  return stageAdvancedToday.get(contactId) === today;
+}
+
+function markAdvancedToday(contactId) {
+  const today = new Date().toISOString().slice(0, 10);
+  stageAdvancedToday.set(contactId, today);
+}
+
+async function sendSlackPipelineUpdate(slackMessage, contactName, contactId) {
+  if (!SLACK_BOT_TOKEN) {
+    console.error('SLACK_BOT_TOKEN not set — skipping Slack notification');
+    return;
+  }
+  try {
+    const ghlUrl = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contactId}`;
+    await axios.post(
+      'https://slack.com/api/chat.postMessage',
+      {
+        channel: PIPELINE_MANAGER_CHANNEL,
+        text: slackMessage,
+        blocks: [
+          {
+            type: 'section',
+            text: { type: 'mrkdwn', text: slackMessage }
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: { type: 'plain_text', text: 'Open in GHL' },
+                url: ghlUrl
+              }
+            ]
+          }
+        ]
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+    console.log('Slack pipeline manager notification sent');
+  } catch (err) {
+    console.error('Failed to send Slack pipeline update:', err.response?.data || err.message);
+  }
+}
 
 // Pipelines where only one opportunity is allowed across all of them
 const LEAD_PIPELINE_IDS = [
@@ -689,11 +747,19 @@ app.post('/webhook', async (req, res) => {
     let finalStageId = claudeResult.new_stage_id;
 
     // For voicemail and no-contact, advance the day/week progression automatically
+    // Guard: only advance once per calendar day per contact to prevent multi-call stage skipping
     if (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT') {
-      const nextStage = getNextStageInProgression(finalPipelineId, previousStageId);
-      if (nextStage) {
-        finalStageId = nextStage;
-        console.log(`Auto-advancing to next stage: ${STAGE_NAMES[nextStage] || nextStage}`);
+      if (hasAdvancedTodayAlready(contact.id)) {
+        console.log(`Stage advancement skipped for ${finalContactName} — already advanced today`);
+        finalStageId = previousStageId; // stay on current stage
+        claudeResult.action = 'NO_ACTION'; // don't trigger a GHL update
+      } else {
+        const nextStage = getNextStageInProgression(finalPipelineId, previousStageId);
+        if (nextStage) {
+          finalStageId = nextStage;
+          markAdvancedToday(contact.id);
+          console.log(`Auto-advancing to next stage: ${STAGE_NAMES[nextStage] || nextStage}`);
+        }
       }
     }
 
@@ -853,6 +919,13 @@ app.post('/webhook', async (req, res) => {
         contact_name: String(finalContactName || 'Unknown'),
         contact_id: String(contact.id || '')
       });
+
+      // Send update to #claude-pipeline-manager
+      await sendSlackPipelineUpdate(
+        emailContent.slack_message || `Call processed for ${finalContactName || 'Unknown'}. Outcome: ${claudeResult.outcome || 'Unknown'}`,
+        finalContactName || 'Unknown',
+        contact.id
+      );
     } catch (emailErr) {
       console.error('Failed to generate email content — full error:', JSON.stringify(emailErr.message || emailErr.response?.data || emailErr));
       await fireGHLSummaryWebhook({
@@ -861,6 +934,13 @@ app.post('/webhook', async (req, res) => {
         contact_name: String(finalContactName || 'Unknown'),
         contact_id: String(contact.id || '')
       });
+
+      // Send fallback update to #claude-pipeline-manager
+      await sendSlackPipelineUpdate(
+        'Call processed for ' + (finalContactName || 'Unknown') + '. Outcome: ' + (claudeResult.outcome || 'Unknown'),
+        finalContactName || 'Unknown',
+        contact.id
+      );
     }
 
     console.log(`Successfully processed call ${callId}: ${claudeResult.outcome}`);
@@ -1456,11 +1536,14 @@ app.get('/briefing', (req, res) => {
   function draftHtml(item) {
     const d = draftLinks[item.message_id];
     if (!d) return '';
+    // Render draft buttons — web Gmail links work on desktop.
+    // On mobile the button opens Gmail web; if user has Gmail app installed
+    // the browser will prompt to open in app on most devices.
     if (d.type === 'single') {
-      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank" rel="noopener" onclick="tryGmailApp(event,'${esc(d.url)}')">✏️ Draft</a>`;
+      return `<a class="btn btn-draft" href="${esc(d.url)}" target="_blank" rel="noopener">✏️ Draft</a>`;
     }
-    return `<a class="btn btn-draft" href="${esc(d.urlYes || '#')}" target="_blank" rel="noopener" onclick="tryGmailApp(event,'${esc(d.urlYes || '')}')">✏️ ${esc(d.labelYes)}</a>
-            <a class="btn btn-draft-alt" href="${esc(d.urlNo || '#')}" target="_blank" rel="noopener" onclick="tryGmailApp(event,'${esc(d.urlNo || '')}')">✏️ ${esc(d.labelNo)}</a>`;
+    return `<a class="btn btn-draft" href="${esc(d.urlYes)}" target="_blank" rel="noopener">✏️ ${esc(d.labelYes)}</a>
+            <a class="btn btn-draft-alt" href="${esc(d.urlNo)}" target="_blank" rel="noopener">✏️ ${esc(d.labelNo)}</a>`;
   }
 
   function markDoneBtn(notionId, title) {
@@ -1585,7 +1668,7 @@ app.get('/briefing', (req, res) => {
         ${item.why ? `<p class="card-why">${esc(item.why)}</p>` : ''}
         ${item.recurring_flag ? `<p class="card-why">${esc(item.recurring_flag)}</p>` : ''}
         <div class="card-actions" style="margin-top:10px;flex-wrap:wrap;gap:6px;">
-          <a class="btn btn-draft" href="${esc(gmailDeepLink)}" target="_blank" onclick="tryGmailApp(event, '${esc(gmailDeepLink)}')">📬 Open Email</a>
+          <a class="btn btn-draft" href="${esc(gmailDeepLink)}" target="_blank">📬 Open Email</a>
           ${draftBtns}
           ${pushToAdminBtn(item)}
           ${pushToDirectorBtn(item)}
@@ -1773,10 +1856,6 @@ app.get('/briefing', (req, res) => {
     font-weight: 600;
     line-height: 1.4;
     word-break: break-word;
-    overflow-wrap: anywhere;
-    flex: 1;
-    min-width: 0;
-    display: block;
   }
   .card-title:hover { color: #0065a3; text-decoration: underline; }
 
@@ -1794,19 +1873,6 @@ app.get('/briefing', (req, res) => {
     flex-shrink: 0;
     flex-wrap: wrap;
     align-items: flex-start;
-    width: 100%;
-    margin-top: 8px;
-  }
-
-  /* On wider screens, actions sit inline with title */
-  @media (min-width: 520px) {
-    .card-actions {
-      width: auto;
-      margin-top: 0;
-    }
-    .card-header {
-      flex-wrap: nowrap;
-    }
   }
 
   /* ── Badges ── */
@@ -2018,23 +2084,6 @@ ${section('stale', '🕰 Stale Tasks', staleItems.length,
 
   // Track done notion IDs in memory so all instances of the same task get greyed out
   const _doneIds = new Set();
-
-  // Try to open Gmail app on iOS via deep link, fall back to web URL
-  function tryGmailApp(e, webUrl) {
-    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    if (!isIOS) return; // Let default link behavior handle desktop
-    e.preventDefault();
-    // Extract message ID from Gmail web URL
-    const msgId = webUrl.split('#inbox/')[1] || webUrl.split('#drafts/')[1] || '';
-    if (msgId) {
-      // Try Gmail app deep link — if Gmail app is installed, this opens it directly
-      window.location.href = 'googlegmail://';
-      // Fallback to web after short delay if app didn't open
-      setTimeout(() => { window.open(webUrl, '_blank'); }, 500);
-    } else {
-      window.open(webUrl, '_blank');
-    }
-  }
 
   async function markDone(btn, notionId, title) {
     if (btn.classList.contains('done') || btn.classList.contains('loading')) return;
