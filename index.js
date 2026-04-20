@@ -1307,6 +1307,7 @@ app.get('/briefing', (req, res) => {
   const overdueItems      = a.overdue_items || [];
   const delegateItems     = a.delegate_to_admin || [];
   const calendarEvents    = a.calendar_events || [];
+  const noDueDateItems    = a.no_due_date_tasks || [];
   const staleItems        = a.stale_tasks || a.stale_items || [];
   const overallSummary    = a.overall_summary || '';
 
@@ -1768,10 +1769,13 @@ ${section('delegate', '👤 Delegate to Admin', delegateItems.length,
 ${section('calendar', '📆 Upcoming Events', calendarEvents.length,
     renderCalendarEvents(calendarEvents, 'No upcoming events in the next 21 days.'), false)}
 
-${section('upcoming', '📅 Task Deadlines', upcomingTasks.length,
-    renderSimpleItems(upcomingTasks, 'No task deadlines in the next 21 days.'), false)}
+${section('upcoming', '📅 Upcoming Deadlines', upcomingTasks.length,
+    renderSimpleItems(upcomingTasks, 'No upcoming task deadlines.'), true)}
 
-${section('stale', '🕰 Stale / No Due Date', staleItems.length,
+${section('noduedate', '📋 All Tasks — No Due Date', noDueDateItems.length,
+    renderSimpleItems(noDueDateItems, 'No tasks without a due date.'), true)}
+
+${section('stale', '🕰 Stale Tasks', staleItems.length,
     renderSimpleItems(staleItems, 'Nothing stale.'), false)}
 
 `}
