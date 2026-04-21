@@ -15,9 +15,41 @@ const TASK_TITLE = 'Claude Assistant: Follow up from previous conversation threa
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const PIPELINE_MANAGER_CHANNEL = 'C0ASJSMT76Y';
 
-// In-memory dedup: prevents the same call ID from being processed more than once.
-// Quo sometimes fires the webhook multiple times for the same call.
-const processedCallIds = new Set();
+// File-backed dedup: prevents the same call ID from being processed more than once.
+// Persisted to /data volume so it survives Railway restarts and redeploys.
+const PROCESSED_CALLS_DIR = require('fs').existsSync('/data') ? '/data' : '/tmp';
+const PROCESSED_CALLS_FILE = require('path').join(PROCESSED_CALLS_DIR, 'processed-calls.json');
+
+function loadProcessedCalls() {
+  try {
+    if (require('fs').existsSync(PROCESSED_CALLS_FILE)) {
+      const data = JSON.parse(require('fs').readFileSync(PROCESSED_CALLS_FILE, 'utf8'));
+      // Prune entries older than 24 hours
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const pruned = {};
+      for (const [id, ts] of Object.entries(data)) {
+        if (ts > cutoff) pruned[id] = ts;
+      }
+      return pruned;
+    }
+  } catch (e) { /* fall through */ }
+  return {};
+}
+
+function hasProcessedCall(callId) {
+  const calls = loadProcessedCalls();
+  return !!calls[callId];
+}
+
+function markCallProcessed(callId) {
+  const calls = loadProcessedCalls();
+  calls[callId] = Date.now();
+  try {
+    require('fs').writeFileSync(PROCESSED_CALLS_FILE, JSON.stringify(calls));
+  } catch (e) {
+    console.error('Failed to save processed calls:', e.message);
+  }
+}
 
 // File-backed stage advancement guard — persists across Railway restarts/deploys.
 // Uses the same /data volume as the briefing file.
@@ -774,29 +806,35 @@ function getTimestamp() {
 }
 
 app.post('/webhook', async (req, res) => {
-  try {
-    const payload = req.body;
-    if (payload.type !== 'call.transcript.completed') {
-      return res.status(200).json({ message: 'Event ignored' });
-    }
+  const payload = req.body;
+  if (payload.type !== 'call.transcript.completed') {
+    return res.status(200).json({ message: 'Event ignored' });
+  }
 
-    const callObject = payload.data.object;
-    const callId = callObject.callId;
+  const callObject = payload.data.object;
+  const callId = callObject.callId;
 
-    // Dedup: if we've already processed this call ID, ignore the retry
-    if (processedCallIds.has(callId)) {
-      console.log(`Duplicate webhook ignored for call ${callId}`);
-      return res.status(200).json({ message: 'Duplicate call ID, already processed' });
-    }
-    processedCallIds.add(callId);
-    // Expire after 1 hour to prevent unbounded memory growth
-    setTimeout(() => processedCallIds.delete(callId), 60 * 60 * 1000);
-    const dialogue = callObject.dialogue || [];
-    const transcript = dialogue.map(d => d.content).join('\n');
+  // Dedup: if we've already processed this call ID, ignore the retry
+  if (hasProcessedCall(callId)) {
+    console.log(`Duplicate webhook ignored for call ${callId}`);
+    return res.status(200).json({ message: 'Duplicate call ID, already processed' });
+  }
+  markCallProcessed(callId);
 
-    if (!transcript || transcript.trim().length === 0) {
-      return res.status(200).json({ message: 'Empty transcript, skipping' });
-    }
+  const dialogue = callObject.dialogue || [];
+  const transcript = dialogue.map(d => d.content).join('\n');
+
+  if (!transcript || transcript.trim().length === 0) {
+    return res.status(200).json({ message: 'Empty transcript, skipping' });
+  }
+
+  // Return 200 to Quo immediately — prevents Quo from retrying the webhook
+  // while processing is still running (which causes duplicate deliveries hours later)
+  res.status(200).json({ success: true, message: 'Webhook received, processing async' });
+
+  // All processing runs async after response is sent
+  setImmediate(async () => {
+    try {
 
     console.log(`Processing call ${callId}, transcript length: ${transcript.length}`);
 
@@ -1138,12 +1176,11 @@ app.post('/webhook', async (req, res) => {
     }
 
     console.log(`Successfully processed call ${callId}: ${claudeResult.outcome} (confidence: ${confidenceScore}%)`);
-    res.status(200).json({ success: true, outcome: claudeResult.outcome });
 
   } catch (error) {
     console.error('Error processing webhook:', error.response?.data || error.message);
-    res.status(500).json({ error: error.message });
   }
+  }); // end setImmediate
 });
 
 // SMS webhook handler
@@ -1394,10 +1431,35 @@ const path = require('path');
 const BRIEFING_DIR = require('fs').existsSync('/data') ? '/data' : '/tmp';
 const BRIEFING_FILE = path.join(BRIEFING_DIR, 'latest-briefing.json');
 
-// In-memory flag tracking whether a briefing run is currently in progress.
-// Simple boolean — no persistence needed, resets on server restart which is fine.
-let briefingIsProcessing = false;
-let briefingProcessingStartedAt = null;
+// File-backed briefing processing flag — survives Railway restarts.
+const BRIEFING_FLAG_FILE = require('path').join(BRIEFING_DIR, 'briefing-processing.json');
+
+function getBriefingProcessingState() {
+  try {
+    if (require('fs').existsSync(BRIEFING_FLAG_FILE)) {
+      const data = JSON.parse(require('fs').readFileSync(BRIEFING_FLAG_FILE, 'utf8'));
+      // Auto-expire after 10 minutes — if it's been that long, something went wrong
+      if (data.startedAt && Date.now() - new Date(data.startedAt).getTime() > 10 * 60 * 1000) {
+        require('fs').unlinkSync(BRIEFING_FLAG_FILE);
+        return { isProcessing: false, startedAt: null };
+      }
+      return { isProcessing: data.isProcessing || false, startedAt: data.startedAt || null };
+    }
+  } catch (e) { /* fall through */ }
+  return { isProcessing: false, startedAt: null };
+}
+
+function setBriefingProcessing(isProcessing) {
+  try {
+    if (!isProcessing) {
+      if (require('fs').existsSync(BRIEFING_FLAG_FILE)) require('fs').unlinkSync(BRIEFING_FLAG_FILE);
+    } else {
+      require('fs').writeFileSync(BRIEFING_FLAG_FILE, JSON.stringify({ isProcessing: true, startedAt: new Date().toISOString() }));
+    }
+  } catch (e) {
+    console.error('Failed to set briefing processing flag:', e.message);
+  }
+}
 const BRIEFING_PIN = process.env.BRIEFING_PIN || '2365';
 const NOTION_TOKEN_BRIEFING = process.env.NOTION_TOKEN;
 
@@ -1408,8 +1470,7 @@ app.post('/save-briefing', (req, res) => {
   try {
     fs.writeFileSync(BRIEFING_FILE, JSON.stringify({ ...req.body, savedAt: new Date().toISOString() }));
     // Clear processing flag — briefing is now saved and ready
-    briefingIsProcessing = false;
-    briefingProcessingStartedAt = null;
+    setBriefingProcessing(false);
     console.log('💾 Briefing saved');
     res.json({ ok: true });
   } catch (err) {
@@ -1609,8 +1670,7 @@ app.get('/run-briefing', async (req, res) => {
   }
 
   // Set processing flag so the briefing page shows the right status
-  briefingIsProcessing = true;
-  briefingProcessingStartedAt = new Date().toISOString();
+  setBriefingProcessing(true);
 
   try {
     // Fire the trigger on the Daily-Briefing service — don't await full completion
@@ -1744,6 +1804,7 @@ app.get('/briefing', (req, res) => {
     }
   } catch (e) { /* fall through to no-data state */ }
 
+  const { isProcessing: briefingIsProcessing, startedAt: briefingProcessingStartedAt } = getBriefingProcessingState();
   const a = data?.analysis || {};
   const draftTexts = data?.draftTexts || {};
   const savedAt = data?.savedAt ? new Date(data.savedAt) : null;
