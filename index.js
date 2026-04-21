@@ -1037,7 +1037,39 @@ app.post('/webhook', async (req, res) => {
       pipelineStageInfo = 'Pipeline: ' + (PIPELINE_NAMES[finalPipelineId] || finalPipelineId) + ' | Stage: ' + (STAGE_NAMES[previousStageId] || 'Unknown') + ' (no change)';
     }
 
-    // Generate Claude-written email — fires GHL summary webhook
+    // Build stage display string
+    const stageSuppressed = claudeResult.action === 'NO_ACTION' &&
+      (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT');
+
+    const stageDisplay = stageChanged
+      ? `${STAGE_NAMES[previousStageId] || 'Unknown'} → ${STAGE_NAMES[finalStageId] || finalStageId}`
+      : stageSuppressed
+        ? `${STAGE_NAMES[previousStageId] || 'Current stage'} (no change — additional touchpoint today)`
+        : (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT')
+          ? `Auto-advanced → ${STAGE_NAMES[finalStageId] || finalStageId}`
+          : `${STAGE_NAMES[previousStageId] || 'Current stage'} (no stage change)`;
+
+    // Slack fires FIRST — before email generation or GHL summary webhook
+    // Never blocked by downstream API calls
+    const callBlocks = buildCallSlackBlocks({
+      contactName: finalContactName || 'Unknown',
+      contactPhone: contactPhone || 'Unknown',
+      callTime: getTimestamp(),
+      teamMember: teamMember || 'Not identified',
+      outcome: claudeResult.outcome || 'Unknown',
+      note: claudeResult.note || '',
+      pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
+      stageDisplay,
+      redFlags: claudeResult.disqualifier_reason || 'None',
+      isNewOpportunity,
+      confidenceScore: claudeResult.confidence_score || 0,
+      confidenceReason: claudeResult.confidence_reason || '',
+      contactId: contact.id
+    });
+
+    await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, callBlocks);
+
+    // Email generation + GHL summary webhook fire after Slack — non-blocking for team visibility
     try {
       const emailContent = await generateCallEmailContent({
         contactName: finalContactName || 'Unknown',
@@ -1071,37 +1103,6 @@ app.post('/webhook', async (req, res) => {
         contact_id: String(contact.id || '')
       });
     }
-
-    // Build stage display string
-    const stageSuppressed = claudeResult.action === 'NO_ACTION' &&
-      (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT');
-
-    const stageDisplay = stageChanged
-      ? `${STAGE_NAMES[previousStageId] || 'Unknown'} → ${STAGE_NAMES[finalStageId] || finalStageId}`
-      : stageSuppressed
-        ? `${STAGE_NAMES[previousStageId] || 'Current stage'} (no change — additional touchpoint today)`
-        : (claudeResult.outcome === 'VOICEMAIL' || claudeResult.outcome === 'NO_CONTACT')
-          ? `Auto-advanced → ${STAGE_NAMES[finalStageId] || finalStageId}`
-          : `${STAGE_NAMES[previousStageId] || 'Current stage'} (no stage change)`;
-
-    // Hardcoded Block Kit format — never deviates from the confirmed template
-    const callBlocks = buildCallSlackBlocks({
-      contactName: finalContactName || 'Unknown',
-      contactPhone: contactPhone || 'Unknown',
-      callTime: getTimestamp(),
-      teamMember: teamMember || 'Not identified',
-      outcome: claudeResult.outcome || 'Unknown',
-      note: claudeResult.note || '',
-      pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || 'Unknown',
-      stageDisplay,
-      redFlags: claudeResult.disqualifier_reason || 'None',
-      isNewOpportunity,
-      confidenceScore: claudeResult.confidence_score || 0,
-      confidenceReason: claudeResult.confidence_reason || '',
-      contactId: contact.id
-    });
-
-    await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, callBlocks);
 
     // Low confidence handling — if < 80% and a GHL change was made, create a task for review
     const confidenceScore = parseInt(claudeResult.confidence_score) || 0;
