@@ -400,7 +400,7 @@ IMPORTANT: Do NOT assign Day/Week stages. The system handles day and week progre
 
 DECISION RULES:
 
-1. CONVERSATION TYPE CHECK: Determine what type of call this was.
+1. CONVERSATION TYPE CHECK: Determine what type of call this was. Pay special attention to whether the contact is currently in an Eval Scheduled stage — this changes the decision logic significantly (see EVAL SCHEDULED CONTACT rules below).
 
 2. NAME EXTRACTION: If the contact name is unknown or a placeholder, attempt to extract the caller name from the transcript. Look for introductions. If found set extracted_name to that name, otherwise null.
 
@@ -408,15 +408,23 @@ DECISION RULES:
 
 4. FOLLOW UP TIMEFRAME: If the person requests follow up at a specific future time, extract that timeframe as a number of days from today. For example "call me in 2 months" = 60, "reach out next January" = calculate from today, "in a few weeks" = 21. Set follow_up_days to this number if applicable, otherwise null.
 
-5. Based on the transcript, determine the outcome:
+5. EVAL SCHEDULED CONTACT RULES: If the current stage is Eval Scheduled, apply these rules FIRST before the general outcomes below:
+
+EVAL SCHEDULED — CONFIRMATORY CALL: Call is about confirming the appointment, asking prep questions, logistics, or general check-in with no indication of cancellation. Set action to NO_ACTION. Add a note only. Do not move the stage.
+
+EVAL SCHEDULED — HARD CANCEL: Contact explicitly cancels and states they are going to an in-network facility, competitor, or otherwise will not be moving forward with the evaluation and gives no indication of returning. Move to Possible Disqualifier stage. Log the reason.
+
+EVAL SCHEDULED — SOFT CANCEL: Contact cancels or postpones due to softer reasons — timing, life circumstances, wants to think more, price concerns, needs to discuss with spouse — but has not ruled out returning. Move to Needs Follow Up or Talked To But Didnt Schedule stage. Log the reason. Set follow_up_days if a timeframe was mentioned.
+
+6. Based on the transcript, determine the outcome:
 
 OUTCOME A - EVAL SCHEDULED: Person agreed to come in for an evaluation or free screen. Move to Eval Scheduled stage. Log appointment details if mentioned.
 
-OUTCOME B - NEEDS FOLLOW UP: Person gave an objection but did not disengage. Common objections: wants insurance/in-network care, needs to speak with spouse, needs to think about it, price concerns, not ready yet. Move to the most appropriate Needs Follow Up or Talked To But Didnt Schedule stage. Log the specific objection.
+OUTCOME B - NEEDS FOLLOW UP: Person gave an objection but did not disengage. Common objections: wants insurance/in-network care, needs to speak with spouse, needs to think about it, price concerns, not ready yet, requested follow-up by email or phone in a specific timeframe. Move to the most appropriate Needs Follow Up or Talked To But Didnt Schedule stage. Log the specific objection. If a timeframe was mentioned, extract follow_up_days.
 
 OUTCOME C - ON HOLD: Person explicitly said they want to be contacted again at a specific future time. Move to On Hold or Call Later stage. Log the timeframe.
 
-OUTCOME D - POSSIBLE DISQUALIFIER: Transcript contains explicit mention of: Medicare or Medicaid, diagnosis outside outpatient orthopedic or sports PT scope, exclusively seeking insurance-based care with zero openness to cash pay, geographic location too far. Move to Possible Disqualifier stage. Log the specific reason.
+OUTCOME D - POSSIBLE DISQUALIFIER: Transcript contains explicit mention of: Medicare or Medicaid, diagnosis outside outpatient orthopedic or sports PT scope, exclusively seeking insurance-based care with zero openness to cash pay, geographic location too far, or explicitly choosing a competitor/in-network facility with no intent to return. Move to Possible Disqualifier stage. Log the specific reason.
 
 OUTCOME E - WRONG NUMBER: Call was a wrong number or spam. Move to Wrong Number stage if Incoming Calls, otherwise NO_ACTION on stage.
 
