@@ -890,6 +890,40 @@ app.post('/webhook', async (req, res) => {
       console.log(`Found existing lead opportunity: ${opportunity.id} in pipeline ${PIPELINE_NAMES[opportunity.pipelineId]}`);
     }
 
+    // ── Existing customer check — runs for ALL contacts before any lead pipeline logic ──
+    // If contact has any Customer Pipeline or Continuity Pipeline card → handle separately
+    const customerCheck = await checkExistingCustomer(contact.id, allOpps);
+    if (customerCheck.isCustomer) {
+      const customerOpp = customerCheck.opp;
+      const currentStageId = customerOpp ? customerOpp.pipelineStageId : null;
+      const isPendingCall = currentStageId === EVAL_CUSTOMER_STAGES.PENDING_CALL;
+      const isPendingNoFirmTime = currentStageId === EVAL_CUSTOMER_STAGES.PENDING_NO_FIRM_TIME;
+
+      // Only act if in a pending stage — check if transcript indicates patient not moving forward
+      if (isPendingCall || isPendingNoFirmTime) {
+        const claudePendingResult = await analyzeWithClaude(transcript, customerOpp.pipelineId, currentStageId, contactName);
+        const notMovingForward = claudePendingResult.outcome === 'POSSIBLE_DISQUALIFIER' ||
+          (claudePendingResult.outcome === 'NEEDS_FOLLOW_UP' && claudePendingResult.note && 
+           /not moving forward|cancell|won't be|will not|no longer|going elsewhere|in.network|decided against/i.test(claudePendingResult.note));
+
+        if (notMovingForward && claudePendingResult.outcome !== 'VOICEMAIL' && claudePendingResult.outcome !== 'NO_CONTACT') {
+          // Move to Closed/Lost
+          try {
+            await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.CLOSED_LOST, null);
+            const ts = getTimestamp();
+            await addNoteToContact(contact.id, `Claude AI Assistant:\n\n${ts}\n\nPatient indicated they will not be moving forward with care. Moved to Closed/Lost.\n\n${claudePendingResult.note || ''}`);
+            console.log(`Customer pipeline: moved ${contactName} to Closed/Lost — patient not moving forward`);
+          } catch (err) {
+            console.error('Failed to update customer pipeline to Closed/Lost:', err.message);
+          }
+        }
+        // All other pending outcomes (voicemail, unclear) → complete silence, stay in pending
+      }
+      // All other Customer/Continuity Pipeline stages → complete silence
+      console.log(`Existing customer detected (${customerCheck.reason}) — no lead pipeline action taken`);
+      return;
+    }
+
     const previousPipelineId = opportunity ? opportunity.pipelineId : null;
     const previousStageId = opportunity ? opportunity.pipelineStageId : null;
     const previousValue = opportunity ? opportunity.monetaryValue : null;
@@ -944,51 +978,9 @@ app.post('/webhook', async (req, res) => {
       markAdvancedToday(contact.id); // reset so day/week won't fire after an action stage today
     }
 
-    // Create opportunity if none exists — but first check if existing customer
+    // Create opportunity if none exists
     let activeOpportunity = opportunity;
     if (!activeOpportunity) {
-      const customerCheck = await checkExistingCustomer(contact.id, allOpps);
-
-      if (customerCheck.isCustomer) {
-        console.log('Existing customer detected — skipping lead pipeline, adding note only');
-        let noteTargetOpp = customerCheck.opp;
-
-        // LTV-only match with no Customer Pipeline card — create retroactive card
-        if (customerCheck.reason === 'ltv' && !noteTargetOpp) {
-          try {
-            noteTargetOpp = await createGHLOpportunity(contact.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED, finalContactName || 'Existing Customer');
-            await addGHLTag(contact.id, 'Retroactively Added to Customer Pipeline');
-            console.log('Created retroactive Customer Pipeline card for LTV customer');
-          } catch (err) {
-            console.error('Failed to create retroactive customer opportunity:', err.message);
-          }
-        }
-
-        const ts = getTimestamp();
-        const existingNote = 'Claude AI Assistant:\n\n' + ts + '\n\nExisting customer identified (' +
-          (customerCheck.reason === 'package_purchased' ? 'Package Purchased in Customer Pipeline' :
-           customerCheck.reason === 'continuity' ? 'Active in Continuity Pipeline' :
-           'Lifetime value > $' + LTV_CUSTOMER_THRESHOLD) +
-          '). No lead pipeline action taken.\n\n' + (claudeResult.note || '');
-        await addNoteToContact(contact.id, existingNote);
-
-        await fireGHLSummaryWebhook({
-          contact_name: finalContactName || 'Unknown',
-          contact_phone: contactPhone || 'Unknown',
-          contact_id: contact.id,
-          outcome: 'EXISTING CUSTOMER — No Lead Action Taken',
-          call_summary: claudeResult.note || '',
-          pipeline_stage_info: 'Existing customer — no lead pipeline changes made',
-          pipeline_name: 'N/A', previous_stage: 'N/A', new_stage: 'N/A',
-          stage_changed: 'No', opportunity_value_previous: 'N/A', opportunity_value_new: 'N/A',
-          note_added: 'Yes', new_contact_created: isNewContact ? 'Yes' : 'No',
-          new_opportunity_created: customerCheck.reason === 'ltv' ? 'Yes — Retroactive Customer Pipeline' : 'No',
-          name_extracted_from_transcript: claudeResult.extracted_name || 'No',
-          disqualifier_flag: 'None', follow_up_task_created: 'No', follow_up_days: 'None'
-        });
-
-        return res.status(200).json({ success: true, outcome: 'EXISTING_CUSTOMER_NO_ACTION' });
-      }
 
       // Not an existing customer — proceed with lead opportunity creation
       const defaultPipelineId = finalPipelineId;
@@ -2774,20 +2766,13 @@ async function getContactLTV(contactId) {
 }
 
 async function checkExistingCustomer(contactId, allOpportunities) {
-  // Signal 1: Has opportunity at Package Purchased in Customer Pipeline
-  const hasPackagePurchased = allOpportunities.some(
-    o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID &&
-    o.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED
-  );
-  if (hasPackagePurchased) return { isCustomer: true, reason: 'package_purchased', opp: allOpportunities.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID && o.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED) };
+  // Signal 1: Has any opportunity in Customer Pipeline (any stage)
+  const customerOpp = allOpportunities.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID);
+  if (customerOpp) return { isCustomer: true, reason: 'customer_pipeline', opp: customerOpp };
 
   // Signal 2: Has any opportunity in Continuity Pipeline
   const continuityOpp = allOpportunities.find(o => o.pipelineId === CONTINUITY_PIPELINE_ID);
   if (continuityOpp) return { isCustomer: true, reason: 'continuity', opp: continuityOpp };
-
-  // Signal 3: Lifetime value > $500
-  const ltv = await getContactLTV(contactId);
-  if (ltv > LTV_CUSTOMER_THRESHOLD) return { isCustomer: true, reason: 'ltv', opp: null, ltv };
 
   return { isCustomer: false };
 }
