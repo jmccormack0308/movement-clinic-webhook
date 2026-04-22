@@ -3867,140 +3867,255 @@ app.get('/metrics', (req, res) => {
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Weekly Metrics Upload — Movement Clinic PT</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
-
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   :root {
-    --teal: #0f6e56;
-    --teal-light: #e6f4f1;
-    --teal-mid: #1a9070;
-    --slate: #1e2a35;
-    --mid: #4a5568;
-    --light: #f7f9f8;
-    --border: #d4e0dc;
+    --dark: #232323;
+    --yellow: #FFD70A;
+    --bg: #F7F8FA;
+    --blue: #0065a3;
+    --blue-light: #e0f0fa;
+    --mid: #6b7280;
+    --border: #e5e7eb;
     --white: #ffffff;
-    --red: #dc2626;
-    --amber: #d97706;
-    --green: #059669;
+    --green-bg: #dcfce7;
+    --green-text: #166534;
+    --red: #ef4444;
   }
 
   body {
-    font-family: 'DM Sans', sans-serif;
-    background: var(--light);
-    color: var(--slate);
+    font-family: 'Montserrat', 'Segoe UI', Arial, sans-serif;
+    background: var(--bg);
+    color: var(--dark);
     min-height: 100vh;
-    padding: 40px 20px 80px;
+    padding: 0 0 80px;
   }
 
-  .header {
-    max-width: 720px;
-    margin: 0 auto 40px;
+  /* Topbar */
+  .topbar {
+    background: var(--dark);
+    border-bottom: 3px solid var(--yellow);
+    padding: 18px 32px;
     display: flex;
     align-items: center;
-    gap: 16px;
+    justify-content: space-between;
+    margin-bottom: 40px;
   }
 
-  .logo-mark {
-    width: 42px; height: 42px;
-    background: var(--teal);
-    border-radius: 10px;
+  .topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .topbar-logo {
+    width: 36px; height: 36px;
+    background: var(--yellow);
+    border-radius: 8px;
     display: flex; align-items: center; justify-content: center;
   }
 
-  .logo-mark svg { width: 22px; height: 22px; fill: white; }
+  .topbar-logo svg { width: 20px; height: 20px; fill: var(--dark); }
 
-  .header-text h1 {
-    font-size: 18px; font-weight: 600; color: var(--slate);
-    letter-spacing: -0.02em;
+  .topbar h1 {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--white);
+    letter-spacing: 0.01em;
   }
 
-  .header-text p {
-    font-size: 13px; color: var(--mid); margin-top: 2px;
-  }
-
-  .badge {
-    margin-left: auto;
-    background: var(--teal-light);
-    color: var(--teal);
-    font-size: 12px;
+  .topbar p {
+    font-size: 11px;
+    color: #9ca3af;
+    margin-top: 1px;
     font-weight: 500;
-    font-family: 'DM Mono', monospace;
-    padding: 5px 12px;
+  }
+
+  .topbar-badge {
+    background: rgba(255,215,10,0.15);
+    color: var(--yellow);
+    font-size: 11px;
+    font-weight: 700;
+    padding: 5px 14px;
     border-radius: 20px;
-    border: 1px solid #b2d8d0;
+    border: 1px solid rgba(255,215,10,0.3);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .container {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 20px;
   }
 
   .card {
     background: var(--white);
     border: 1px solid var(--border);
-    border-radius: 14px;
+    border-radius: 10px;
     padding: 28px 32px;
-    max-width: 720px;
-    margin: 0 auto 20px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
   }
 
   .card-title {
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--teal);
+    letter-spacing: 1.5px;
+    color: var(--mid);
     margin-bottom: 20px;
     padding-bottom: 12px;
-    border-bottom: 1px solid var(--teal-light);
+    border-bottom: 1px solid var(--border);
   }
 
-  .upload-grid {
-    display: grid;
-    gap: 14px;
-  }
-
-  .upload-row {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 16px;
-    background: var(--light);
-    border: 1px solid var(--border);
+  /* Drop zone */
+  .drop-zone {
+    border: 2px dashed var(--border);
     border-radius: 10px;
-    transition: border-color 0.15s;
+    padding: 36px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    background: var(--bg);
+    position: relative;
   }
 
-  .upload-row:focus-within { border-color: var(--teal-mid); }
-
-  .upload-label {
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--slate);
+  .drop-zone:hover, .drop-zone.drag-over {
+    border-color: var(--blue);
+    background: var(--blue-light);
   }
 
-  .upload-sub {
-    font-size: 11px;
+  .drop-zone input[type="file"] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+
+  .drop-icon {
+    width: 44px; height: 44px;
+    background: var(--dark);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    margin: 0 auto 14px;
+  }
+
+  .drop-icon svg { width: 22px; height: 22px; fill: var(--yellow); }
+
+  .drop-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--dark);
+    margin-bottom: 6px;
+  }
+
+  .drop-sub {
+    font-size: 12px;
     color: var(--mid);
-    margin-top: 2px;
-    font-family: 'DM Mono', monospace;
+    font-weight: 500;
+    line-height: 1.6;
   }
 
-  .file-btn {
-    appearance: none;
-    background: var(--white);
+  .drop-sub strong { color: var(--dark); }
+
+  /* File list */
+  .file-list {
+    margin-top: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .file-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 8px 14px;
     font-size: 12px;
-    font-family: 'DM Sans', sans-serif;
-    color: var(--mid);
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.15s;
   }
 
-  .file-btn:hover { border-color: var(--teal-mid); color: var(--teal); }
+  .file-item-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
 
-  input[type="file"] { display: none; }
+  .file-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--green-text);
+    flex-shrink: 0;
+  }
+
+  .file-dot.unmatched { background: var(--red); }
+
+  .file-name {
+    font-weight: 600;
+    color: var(--dark);
+  }
+
+  .file-type {
+    font-size: 11px;
+    color: var(--mid);
+    font-weight: 500;
+  }
+
+  .file-remove {
+    background: none;
+    border: none;
+    color: var(--mid);
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .file-remove:hover { color: var(--red); background: #fee2e2; }
+
+  /* Tasks section */
+  .task-instructions {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--dark);
+    background: #FFF8E1;
+    border: 1px solid var(--yellow);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin-bottom: 20px;
+    line-height: 1.6;
+  }
+
+  .task-instructions .inst-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--dark);
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .task-instructions ol {
+    padding-left: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #4b3800;
+  }
+
+  .task-instructions ol li { margin-bottom: 4px; }
+
+  .task-instructions .warn {
+    font-size: 12px;
+    font-weight: 700;
+    color: #92400e;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255,215,10,0.4);
+  }
 
   .task-table {
     width: 100%;
@@ -4009,9 +4124,9 @@ app.get('/metrics', (req, res) => {
 
   .task-table th {
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 1px;
     color: var(--mid);
     text-align: left;
     padding: 0 0 12px;
@@ -4020,107 +4135,96 @@ app.get('/metrics', (req, res) => {
   .task-table th:last-child { text-align: right; }
 
   .task-table td {
-    padding: 10px 0;
-    border-top: 1px solid var(--light);
+    padding: 12px 0;
+    border-top: 1px solid var(--border);
   }
 
-  .task-table .pt-name {
+  .pt-name {
     font-size: 14px;
-    font-weight: 500;
-    color: var(--slate);
+    font-weight: 600;
+    color: var(--dark);
   }
 
-  .task-table .pt-role {
+  .pt-role {
     font-size: 11px;
     color: var(--mid);
-    margin-top: 1px;
+    margin-top: 2px;
+    font-weight: 500;
   }
 
   .task-input {
-    width: 90px;
+    width: 100px;
     text-align: right;
-    padding: 8px 12px;
+    padding: 9px 14px;
     border: 1px solid var(--border);
     border-radius: 8px;
     font-size: 14px;
-    font-family: 'DM Mono', monospace;
-    color: var(--slate);
-    background: var(--light);
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 600;
+    color: var(--dark);
+    background: var(--bg);
     display: block;
     margin-left: auto;
-    transition: border-color 0.15s;
+    transition: border-color 0.15s, background 0.15s;
   }
 
-  .task-input:focus { outline: none; border-color: var(--teal-mid); background: white; }
+  .task-input:focus { outline: none; border-color: var(--blue); background: white; }
 
-  .week-info {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    background: var(--teal-light);
-    border-radius: 8px;
-    margin-bottom: 20px;
-    font-size: 13px;
-    color: var(--teal);
-  }
-
-  .week-info strong { font-weight: 600; }
-
+  /* Submit */
   .submit-btn {
     display: block;
     width: 100%;
-    max-width: 720px;
-    margin: 30px auto 0;
     padding: 16px;
-    background: var(--teal);
-    color: white;
-    font-family: 'DM Sans', sans-serif;
-    font-size: 15px;
-    font-weight: 600;
+    background: var(--dark);
+    color: var(--white);
+    font-family: 'Montserrat', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
     border: none;
-    border-radius: 12px;
+    border-radius: 10px;
     cursor: pointer;
-    letter-spacing: -0.01em;
     transition: background 0.15s, transform 0.1s;
+    margin-top: 24px;
   }
 
-  .submit-btn:hover { background: var(--teal-mid); }
+  .submit-btn:hover { background: var(--blue); }
   .submit-btn:active { transform: scale(0.99); }
-  .submit-btn:disabled { background: #9ab5af; cursor: not-allowed; }
+  .submit-btn:disabled { background: #9ca3af; cursor: not-allowed; }
 
   .status-bar {
-    max-width: 720px;
-    margin: 16px auto 0;
+    margin-top: 16px;
     padding: 14px 20px;
-    border-radius: 10px;
+    border-radius: 8px;
     font-size: 13px;
-    font-weight: 500;
+    font-weight: 600;
     display: none;
   }
 
   .status-bar.processing { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; display: block; }
-  .status-bar.success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; display: block; }
+  .status-bar.success { background: var(--green-bg); color: var(--green-text); border: 1px solid #bbf7d0; display: block; }
   .status-bar.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
-
-  .file-chosen { font-size: 11px; color: var(--teal); margin-top: 3px; font-family: 'DM Mono', monospace; }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div class="logo-mark">
-    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/>
-    </svg>
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="topbar-logo">
+      <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <path d="M13.5 2c-5.621 0-10.211 4.443-10.475 10h-3.025l5 6.625 5-6.625h-2.975c.257-3.351 3.06-6 6.475-6 3.584 0 6.5 2.916 6.5 6.5s-2.916 6.5-6.5 6.5c-1.863 0-3.542-.793-4.728-2.053l-2.427 3.216c1.877 1.754 4.389 2.837 7.155 2.837 5.79 0 10.5-4.71 10.5-10.5s-4.71-10.5-10.5-10.5z"/>
+      </svg>
+    </div>
+    <div>
+      <h1>Weekly Metrics Upload</h1>
+      <p>Movement Clinic Physical Therapy</p>
+    </div>
   </div>
-  <div class="header-text">
-    <h1>Weekly Metrics Upload</h1>
-    <p>Movement Clinic Physical Therapy</p>
-  </div>
-  <div class="badge">${monthName} ${year} · Week ${weekNum}</div>
+  <div class="topbar-badge">${monthName} ${year} · Week ${weekNum}</div>
 </div>
 
+<div class="container">
 <form id="metricsForm" enctype="multipart/form-data">
   <input type="hidden" name="month" value="${monthName}">
   <input type="hidden" name="year" value="${year}">
@@ -4129,68 +4233,39 @@ app.get('/metrics', (req, res) => {
   <!-- Report Uploads -->
   <div class="card">
     <div class="card-title">Report Uploads</div>
-    <div class="upload-grid">
 
-      <div class="upload-row">
-        <div>
-          <div class="upload-label">General Visit Report</div>
-          <div class="upload-sub">PTEverywhere · CSV · Visit totals by provider</div>
-          <div class="file-chosen" id="chosen-visits"></div>
-        </div>
-        <label class="file-btn" for="file-visits">Choose file</label>
-        <input type="file" id="file-visits" name="generalVisits" accept=".csv">
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" multiple accept=".csv,.pdf">
+      <div class="drop-icon">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
       </div>
-
-      <div class="upload-row">
-        <div>
-          <div class="upload-label">Appointment Metrics Report</div>
-          <div class="upload-sub">PTEverywhere · CSV · Schedule efficiency per provider</div>
-          <div class="file-chosen" id="chosen-appt"></div>
-        </div>
-        <label class="file-btn" for="file-appt">Choose file</label>
-        <input type="file" id="file-appt" name="appointmentMetrics" accept=".csv">
+      <div class="drop-title">Drop all 5 report files here</div>
+      <div class="drop-sub">
+        or click to browse — accepts <strong>CSV</strong> and <strong>PDF</strong><br>
+        Files are identified automatically by their export filename
       </div>
-
-      <div class="upload-row">
-        <div>
-          <div class="upload-label">Cancellation Report</div>
-          <div class="upload-sub">PTEverywhere · CSV · Cancellations and no-shows by provider</div>
-          <div class="file-chosen" id="chosen-cancel"></div>
-        </div>
-        <label class="file-btn" for="file-cancel">Choose file</label>
-        <input type="file" id="file-cancel" name="cancellations" accept=".csv">
-      </div>
-
-      <div class="upload-row">
-        <div>
-          <div class="upload-label">Charting Report</div>
-          <div class="upload-sub">PTEverywhere · CSV · Open charts per provider</div>
-          <div class="file-chosen" id="chosen-charts"></div>
-        </div>
-        <label class="file-btn" for="file-charts">Choose file</label>
-        <input type="file" id="file-charts" name="charting" accept=".csv">
-      </div>
-
-      <div class="upload-row">
-        <div>
-          <div class="upload-label">Total Leads Report</div>
-          <div class="upload-sub">GHL · PDF · Total leads this month</div>
-          <div class="file-chosen" id="chosen-leads"></div>
-        </div>
-        <label class="file-btn" for="file-leads">Choose file</label>
-        <input type="file" id="file-leads" name="leads" accept=".pdf">
-      </div>
-
     </div>
+
+    <div class="file-list" id="fileList"></div>
   </div>
 
   <!-- Overdue Tasks Manual Entry -->
   <div class="card">
     <div class="card-title">Overdue Tasks — Manual Entry</div>
 
-    <div class="week-info">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      Snapshot as of today — <strong>Week ${weekNum} of ${monthName}</strong>. Check GHL Tasks view, filter by assignee, enter the open/overdue count for each provider.
+    <div class="task-instructions">
+      <div class="inst-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#92400e" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        How to find overdue task counts in GHL
+      </div>
+      <ol>
+        <li>Go to <strong>Contacts</strong> in GHL → click the <strong>Tasks</strong> tab in the left nav</li>
+        <li>Use the <strong>filter icon</strong> to filter by <strong>Assignee</strong> and set Status to <strong>Incomplete</strong></li>
+        <li>Sort by <strong>Due Date (oldest first)</strong> to see overdue tasks at the top</li>
+        <li>Count only tasks with a due date <strong>before today</strong> — enter that number below</li>
+        <li>Repeat for each provider</li>
+      </ol>
+      <div class="warn">⚠️ Enter OVERDUE tasks only (past due date) — do not include tasks due today or in the future</div>
     </div>
 
     <table class="task-table">
@@ -4207,7 +4282,7 @@ app.get('/metrics', (req, res) => {
             <div class="pt-role">Physical Therapist</div>
           </td>
           <td>
-            <input type="number" class="task-input" name="tasks_chris" min="0" value="0" placeholder="0">
+            <input type="number" class="task-input" name="tasks_chris" min="0" value="0">
           </td>
         </tr>
         <tr>
@@ -4216,7 +4291,7 @@ app.get('/metrics', (req, res) => {
             <div class="pt-role">Physical Therapist</div>
           </td>
           <td>
-            <input type="number" class="task-input" name="tasks_tj" min="0" value="0" placeholder="0">
+            <input type="number" class="task-input" name="tasks_tj" min="0" value="0">
           </td>
         </tr>
         <tr>
@@ -4225,7 +4300,7 @@ app.get('/metrics', (req, res) => {
             <div class="pt-role">Physical Therapist</div>
           </td>
           <td>
-            <input type="number" class="task-input" name="tasks_john" min="0" value="0" placeholder="0">
+            <input type="number" class="task-input" name="tasks_john" min="0" value="0">
           </td>
         </tr>
       </tbody>
@@ -4237,22 +4312,94 @@ app.get('/metrics', (req, res) => {
   </button>
   <div class="status-bar" id="statusBar"></div>
 </form>
+</div>
 
 <script>
-// Show filename when file chosen
-['visits','appt','cancel','charts','leads'].forEach(key => {
-  const input = document.getElementById('file-' + key);
-  const label = document.getElementById('chosen-' + key);
-  if (input && label) {
-    input.addEventListener('change', () => {
-      label.textContent = input.files[0] ? '✓ ' + input.files[0].name : '';
-    });
+// File type detection by filename
+const FILE_PATTERNS = {
+  generalVisits:      /GeneralVisit|General_Visit/i,
+  appointmentMetrics: /AppointmentMetrics|Appointment_Metrics/i,
+  cancellations:      /Cancellation/i,
+  charting:           /Charting|Chart/i,
+  leads:              /Lead|leads/i
+};
+
+const FILE_LABELS = {
+  generalVisits:      'General Visit Report',
+  appointmentMetrics: 'Appointment Metrics Report',
+  cancellations:      'Cancellation Report',
+  charting:           'Charting Report',
+  leads:              'Total Leads Report'
+};
+
+let selectedFiles = {}; // key → File
+
+function detectFileType(filename) {
+  for (const [key, pattern] of Object.entries(FILE_PATTERNS)) {
+    if (pattern.test(filename)) return key;
   }
+  return null;
+}
+
+function renderFileList() {
+  const list = document.getElementById('fileList');
+  list.innerHTML = '';
+  for (const [key, file] of Object.entries(selectedFiles)) {
+    const label = FILE_LABELS[key] || 'Unknown';
+    const matched = !!FILE_LABELS[key];
+    const item = document.createElement('div');
+    item.className = 'file-item';
+    item.innerHTML = \`
+      <div class="file-item-left">
+        <div class="file-dot \${matched ? '' : 'unmatched'}"></div>
+        <div>
+          <div class="file-name">\${file.name}</div>
+          <div class="file-type">\${matched ? '✓ ' + label : '⚠ Unrecognized — check filename'}</div>
+        </div>
+      </div>
+      <button class="file-remove" onclick="removeFile('\${key}')" title="Remove">×</button>
+    \`;
+    list.appendChild(item);
+  }
+}
+
+function removeFile(key) {
+  delete selectedFiles[key];
+  renderFileList();
+}
+
+function addFiles(files) {
+  for (const file of files) {
+    const type = detectFileType(file.name);
+    const key = type || ('unknown_' + file.name);
+    selectedFiles[key] = file;
+  }
+  renderFileList();
+}
+
+// Drop zone
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  addFiles(e.dataTransfer.files);
 });
+fileInput.addEventListener('change', () => { addFiles(fileInput.files); fileInput.value = ''; });
 
 async function submitMetrics() {
   const btn = document.getElementById('submitBtn');
   const status = document.getElementById('statusBar');
+
+  if (Object.keys(selectedFiles).length === 0) {
+    status.className = 'status-bar error';
+    status.textContent = '❌ Please upload at least one report file before submitting.';
+    return;
+  }
+
   btn.disabled = true;
   btn.textContent = 'Processing...';
   status.className = 'status-bar processing';
@@ -4260,6 +4407,13 @@ async function submitMetrics() {
 
   const form = document.getElementById('metricsForm');
   const formData = new FormData(form);
+
+  // Attach detected files under their correct field names
+  for (const [key, file] of Object.entries(selectedFiles)) {
+    if (FILE_LABELS[key]) {
+      formData.append(key, file, file.name);
+    }
+  }
 
   try {
     const resp = await fetch('/metrics/submit', { method: 'POST', body: formData });
