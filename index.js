@@ -4234,6 +4234,30 @@ app.get('/metrics', (req, res) => {
   <div class="card">
     <div class="card-title">Report Uploads</div>
 
+    <div style="background:#232323; border-radius:8px; padding:14px 20px; margin-bottom:20px; text-align:center;">
+      <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1.5px; color:#FFD70A; margin-bottom:4px;">Report Date Range</div>
+      <div style="font-size:18px; font-weight:700; color:#ffffff; letter-spacing:0.02em;">${monthName} 1 – ${monthName} ${new Date(year, now.getMonth()+1, 0).getDate()}, ${year}</div>
+      <div style="font-size:11px; color:#9ca3af; margin-top:4px; font-weight:500;">Set this date range when exporting all reports</div>
+    </div>
+
+    <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:20px;">
+      <div style="background:#F7F8FA; border:1px solid #e5e7eb; border-radius:8px; padding:16px;">
+        <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#6b7280; margin-bottom:10px;">PTEverywhere Reports</div>
+        <ul style="list-style:none; padding:0; font-size:12px; font-weight:600; color:#232323; display:flex; flex-direction:column; gap:7px;">
+          <li style="display:flex; align-items:flex-start; gap:8px;"><span style="color:#0065a3; flex-shrink:0;">→</span> General Visit Report</li>
+          <li style="display:flex; align-items:flex-start; gap:8px;"><span style="color:#0065a3; flex-shrink:0;">→</span> Appointment Metrics Report</li>
+          <li style="display:flex; align-items:flex-start; gap:8px;"><span style="color:#0065a3; flex-shrink:0;">→</span> Cancellation Report</li>
+          <li style="display:flex; align-items:flex-start; gap:8px; line-height:1.4;"><span style="color:#0065a3; flex-shrink:0;">→</span><span>Charting Report <span style="display:block; font-size:11px; font-weight:500; color:#ef4444; margin-top:2px;">⚠ Exclude Jordan McCormack before exporting</span></span></li>
+        </ul>
+      </div>
+      <div style="background:#F7F8FA; border:1px solid #e5e7eb; border-radius:8px; padding:16px;">
+        <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:#6b7280; margin-bottom:10px;">GHL Report</div>
+        <ul style="list-style:none; padding:0; font-size:12px; font-weight:600; color:#232323; display:flex; flex-direction:column; gap:7px;">
+          <li style="display:flex; align-items:flex-start; gap:8px;"><span style="color:#0065a3; flex-shrink:0;">→</span><span>Total Leads This Month <span style="display:block; font-size:11px; font-weight:500; color:#6b7280; margin-top:2px;">Export as PDF from GHL Reporting</span></span></li>
+        </ul>
+      </div>
+    </div>
+
     <div class="drop-zone" id="dropZone">
       <input type="file" id="fileInput" multiple accept=".csv,.pdf">
       <div class="drop-icon">
