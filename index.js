@@ -154,7 +154,8 @@ const PIPELINE_PROGRESSIONS = {
     'cd0b48bb-6d28-4a94-9d56-356a9c440581', // Day 3
     '26cb842d-057f-4c66-8346-4caf013d9254', // Day 4
     'e7758452-6897-46cc-b5d7-18a747e1ebe7', // Day 5
-    '299ab8d7-9131-4935-90b7-eefd09d94e7c', // Week 2
+    '299ab8d7-9131-4935-90b7-eefd09d94e7c', // Week 2 - First Attempt
+    'b10c94e2-df7a-41b6-9683-90ef125fbfc0', // Week 2 - Second Attempt
     '0506c939-6ecd-4a22-8ba3-15e0f192f2f3', // Week 3
     'e311b502-3301-4be0-8b0d-0b84c578603d', // Week 4
     '804a7e8b-2d32-4796-9951-71f9380b7363', // Week 6
@@ -269,7 +270,8 @@ const STAGE_NAMES = {
   'cd0b48bb-6d28-4a94-9d56-356a9c440581': 'Day 3',
   '26cb842d-057f-4c66-8346-4caf013d9254': 'Day 4',
   'e7758452-6897-46cc-b5d7-18a747e1ebe7': 'Day 5',
-  '299ab8d7-9131-4935-90b7-eefd09d94e7c': 'Week 2 (2x/wk)',
+  '299ab8d7-9131-4935-90b7-eefd09d94e7c': 'Week 2 - First Attempt',
+  'b10c94e2-df7a-41b6-9683-90ef125fbfc0': 'Week 2 - Second Attempt',
   '0506c939-6ecd-4a22-8ba3-15e0f192f2f3': 'Week 3 (1x/wk)',
   'e311b502-3301-4be0-8b0d-0b84c578603d': 'Week 4 (1x/wk)',
   '804a7e8b-2d32-4796-9951-71f9380b7363': 'Week 6 (1x/wk)',
@@ -466,8 +468,10 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
+OUTCOME H - UNCERTAIN PATIENT STATUS: The transcript contains signals suggesting this may be an existing patient (references ongoing treatment, sessions already happening, mentions a PT by first name familiarly, discusses payment for existing visits, or context clearly implies an existing care relationship) BUT no existing Customer Pipeline card was found. Do NOT create a lead pipeline card. Set action to NO_ACTION. This requires human review.
+
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent"}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or UNCERTAIN_PATIENT_STATUS","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent"}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -976,6 +980,45 @@ app.post('/webhook', async (req, res) => {
     const ACTION_OUTCOMES = ['EVAL_SCHEDULED', 'NEEDS_FOLLOW_UP', 'ON_HOLD', 'POSSIBLE_DISQUALIFIER', 'WRONG_NUMBER'];
     if (ACTION_OUTCOMES.includes(claudeResult.outcome)) {
       markAdvancedToday(contact.id); // reset so day/week won't fire after an action stage today
+    }
+
+    // Uncertain patient status — no lead pipeline action, create task + Slack alert for human review
+    if (claudeResult.outcome === 'UNCERTAIN_PATIENT_STATUS') {
+      console.log(`Uncertain patient status for ${finalContactName} — flagging for human review`);
+      try {
+        const uncertainDueDate = new Date();
+        uncertainDueDate.setDate(uncertainDueDate.getDate() + 1);
+        await createGHLTask(
+          contact.id,
+          `Uncertain Patient Status — ${capitalizeFullName(finalContactName)}`,
+          uncertainDueDate
+        );
+        console.log('Uncertain patient status task created');
+      } catch (taskErr) {
+        console.error('Failed to create uncertain patient task:', taskErr.message);
+      }
+      // Send Slack alert
+      const uncertainBlocks = {
+        fallback: `Uncertain Patient Status — ${capitalizeFullName(finalContactName)}`,
+        blocks: [
+          { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
+          { type: 'section', text: { type: 'mrkdwn', text: '⚠️ *Uncertain Patient Status — Human Review Required*' } },
+          { type: 'divider' },
+          { type: 'section', fields: [
+            { type: 'mrkdwn', text: `*Name*\n${capitalizeFullName(finalContactName)}` },
+            { type: 'mrkdwn', text: `*Phone*\n${contactPhone || 'Unknown'}` },
+            { type: 'mrkdwn', text: `*Call Time*\n${getTimestamp()}` },
+            { type: 'mrkdwn', text: `*Team Member on Phone Call*\n${teamMember || 'Not identified'}` }
+          ]},
+          { type: 'divider' },
+          { type: 'section', text: { type: 'mrkdwn', text: `*Why Flagged*\n${claudeResult.note || 'Transcript suggests existing patient relationship but no Customer Pipeline card found.'}` } },
+          { type: 'divider' },
+          { type: 'section', text: { type: 'mrkdwn', text: '📋 *Action Required:* Verify if this is an existing patient and add to Customer Pipeline if so. GHL task created for info@.' } },
+          { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open in GHL' }, url: `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}` }] }
+        ]
+      };
+      await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, uncertainBlocks);
+      return;
     }
 
     // Create opportunity if none exists
@@ -2541,7 +2584,8 @@ const EVAL_CUSTOMER_STAGES = {
   PENDING_NO_FIRM_TIME: 'eb8828cb-98c5-4cdd-8510-56a174540a4e',
   PACKAGE_PURCHASED: 'cc3f6b52-846a-4bcc-9cd5-646ca5712ea1',
   NOT_GOOD_TIME: 'f7ce8c60-7695-4da4-8c1b-5a030967647a',
-  CLOSED_LOST: '5b13fe92-130a-4cd6-b9a5-eca5f8ff5729'
+  CLOSED_LOST: '5b13fe92-130a-4cd6-b9a5-eca5f8ff5729',
+  ACTIVE_PATIENT_SPECIAL_CIRCUMSTANCE: '52fb05ae-4af2-40dc-9264-68e42de8b3ed'
 };
 
 // LTV field key from GHL
