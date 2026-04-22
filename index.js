@@ -154,8 +154,7 @@ const PIPELINE_PROGRESSIONS = {
     'cd0b48bb-6d28-4a94-9d56-356a9c440581', // Day 3
     '26cb842d-057f-4c66-8346-4caf013d9254', // Day 4
     'e7758452-6897-46cc-b5d7-18a747e1ebe7', // Day 5
-    '299ab8d7-9131-4935-90b7-eefd09d94e7c', // Week 2 - First Attempt
-    'b10c94e2-df7a-41b6-9683-90ef125fbfc0', // Week 2 - Second Attempt
+    '299ab8d7-9131-4935-90b7-eefd09d94e7c', // Week 2
     '0506c939-6ecd-4a22-8ba3-15e0f192f2f3', // Week 3
     'e311b502-3301-4be0-8b0d-0b84c578603d', // Week 4
     '804a7e8b-2d32-4796-9951-71f9380b7363', // Week 6
@@ -270,8 +269,7 @@ const STAGE_NAMES = {
   'cd0b48bb-6d28-4a94-9d56-356a9c440581': 'Day 3',
   '26cb842d-057f-4c66-8346-4caf013d9254': 'Day 4',
   'e7758452-6897-46cc-b5d7-18a747e1ebe7': 'Day 5',
-  '299ab8d7-9131-4935-90b7-eefd09d94e7c': 'Week 2 - First Attempt',
-  'b10c94e2-df7a-41b6-9683-90ef125fbfc0': 'Week 2 - Second Attempt',
+  '299ab8d7-9131-4935-90b7-eefd09d94e7c': 'Week 2 (2x/wk)',
   '0506c939-6ecd-4a22-8ba3-15e0f192f2f3': 'Week 3 (1x/wk)',
   'e311b502-3301-4be0-8b0d-0b84c578603d': 'Week 4 (1x/wk)',
   '804a7e8b-2d32-4796-9951-71f9380b7363': 'Week 6 (1x/wk)',
@@ -468,10 +466,8 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
-OUTCOME H - UNCERTAIN PATIENT STATUS: The transcript contains signals suggesting this may be an existing patient (references ongoing treatment, sessions already happening, mentions a PT by first name familiarly, discusses payment for existing visits, or context clearly implies an existing care relationship) BUT no existing Customer Pipeline card was found. Do NOT create a lead pipeline card. Set action to NO_ACTION. This requires human review.
-
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or UNCERTAIN_PATIENT_STATUS","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent"}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent"}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -894,40 +890,6 @@ app.post('/webhook', async (req, res) => {
       console.log(`Found existing lead opportunity: ${opportunity.id} in pipeline ${PIPELINE_NAMES[opportunity.pipelineId]}`);
     }
 
-    // ── Existing customer check — runs for ALL contacts before any lead pipeline logic ──
-    // If contact has any Customer Pipeline or Continuity Pipeline card → handle separately
-    const customerCheck = await checkExistingCustomer(contact.id, allOpps);
-    if (customerCheck.isCustomer) {
-      const customerOpp = customerCheck.opp;
-      const currentStageId = customerOpp ? customerOpp.pipelineStageId : null;
-      const isPendingCall = currentStageId === EVAL_CUSTOMER_STAGES.PENDING_CALL;
-      const isPendingNoFirmTime = currentStageId === EVAL_CUSTOMER_STAGES.PENDING_NO_FIRM_TIME;
-
-      // Only act if in a pending stage — check if transcript indicates patient not moving forward
-      if (isPendingCall || isPendingNoFirmTime) {
-        const claudePendingResult = await analyzeWithClaude(transcript, customerOpp.pipelineId, currentStageId, contactName);
-        const notMovingForward = claudePendingResult.outcome === 'POSSIBLE_DISQUALIFIER' ||
-          (claudePendingResult.outcome === 'NEEDS_FOLLOW_UP' && claudePendingResult.note && 
-           /not moving forward|cancell|won't be|will not|no longer|going elsewhere|in.network|decided against/i.test(claudePendingResult.note));
-
-        if (notMovingForward && claudePendingResult.outcome !== 'VOICEMAIL' && claudePendingResult.outcome !== 'NO_CONTACT') {
-          // Move to Closed/Lost
-          try {
-            await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.CLOSED_LOST, null);
-            const ts = getTimestamp();
-            await addNoteToContact(contact.id, `Claude AI Assistant:\n\n${ts}\n\nPatient indicated they will not be moving forward with care. Moved to Closed/Lost.\n\n${claudePendingResult.note || ''}`);
-            console.log(`Customer pipeline: moved ${contactName} to Closed/Lost — patient not moving forward`);
-          } catch (err) {
-            console.error('Failed to update customer pipeline to Closed/Lost:', err.message);
-          }
-        }
-        // All other pending outcomes (voicemail, unclear) → complete silence, stay in pending
-      }
-      // All other Customer/Continuity Pipeline stages → complete silence
-      console.log(`Existing customer detected (${customerCheck.reason}) — no lead pipeline action taken`);
-      return;
-    }
-
     const previousPipelineId = opportunity ? opportunity.pipelineId : null;
     const previousStageId = opportunity ? opportunity.pipelineStageId : null;
     const previousValue = opportunity ? opportunity.monetaryValue : null;
@@ -982,48 +944,51 @@ app.post('/webhook', async (req, res) => {
       markAdvancedToday(contact.id); // reset so day/week won't fire after an action stage today
     }
 
-    // Uncertain patient status — no lead pipeline action, create task + Slack alert for human review
-    if (claudeResult.outcome === 'UNCERTAIN_PATIENT_STATUS') {
-      console.log(`Uncertain patient status for ${finalContactName} — flagging for human review`);
-      try {
-        const uncertainDueDate = new Date();
-        uncertainDueDate.setDate(uncertainDueDate.getDate() + 1);
-        await createGHLTask(
-          contact.id,
-          `Uncertain Patient Status — ${capitalizeFullName(finalContactName)}`,
-          uncertainDueDate
-        );
-        console.log('Uncertain patient status task created');
-      } catch (taskErr) {
-        console.error('Failed to create uncertain patient task:', taskErr.message);
-      }
-      // Send Slack alert
-      const uncertainBlocks = {
-        fallback: `Uncertain Patient Status — ${capitalizeFullName(finalContactName)}`,
-        blocks: [
-          { type: 'header', text: { type: 'plain_text', text: 'Claude AI Assistant — Call Summary', emoji: true } },
-          { type: 'section', text: { type: 'mrkdwn', text: '⚠️ *Uncertain Patient Status — Human Review Required*' } },
-          { type: 'divider' },
-          { type: 'section', fields: [
-            { type: 'mrkdwn', text: `*Name*\n${capitalizeFullName(finalContactName)}` },
-            { type: 'mrkdwn', text: `*Phone*\n${contactPhone || 'Unknown'}` },
-            { type: 'mrkdwn', text: `*Call Time*\n${getTimestamp()}` },
-            { type: 'mrkdwn', text: `*Team Member on Phone Call*\n${teamMember || 'Not identified'}` }
-          ]},
-          { type: 'divider' },
-          { type: 'section', text: { type: 'mrkdwn', text: `*Why Flagged*\n${claudeResult.note || 'Transcript suggests existing patient relationship but no Customer Pipeline card found.'}` } },
-          { type: 'divider' },
-          { type: 'section', text: { type: 'mrkdwn', text: '📋 *Action Required:* Verify if this is an existing patient and add to Customer Pipeline if so. GHL task created for info@.' } },
-          { type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Open in GHL' }, url: `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}` }] }
-        ]
-      };
-      await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, uncertainBlocks);
-      return;
-    }
-
-    // Create opportunity if none exists
+    // Create opportunity if none exists — but first check if existing customer
     let activeOpportunity = opportunity;
     if (!activeOpportunity) {
+      const customerCheck = await checkExistingCustomer(contact.id, allOpps);
+
+      if (customerCheck.isCustomer) {
+        console.log('Existing customer detected — skipping lead pipeline, adding note only');
+        let noteTargetOpp = customerCheck.opp;
+
+        // LTV-only match with no Customer Pipeline card — create retroactive card
+        if (customerCheck.reason === 'ltv' && !noteTargetOpp) {
+          try {
+            noteTargetOpp = await createGHLOpportunity(contact.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED, finalContactName || 'Existing Customer');
+            await addGHLTag(contact.id, 'Retroactively Added to Customer Pipeline');
+            console.log('Created retroactive Customer Pipeline card for LTV customer');
+          } catch (err) {
+            console.error('Failed to create retroactive customer opportunity:', err.message);
+          }
+        }
+
+        const ts = getTimestamp();
+        const existingNote = 'Claude AI Assistant:\n\n' + ts + '\n\nExisting customer identified (' +
+          (customerCheck.reason === 'package_purchased' ? 'Package Purchased in Customer Pipeline' :
+           customerCheck.reason === 'continuity' ? 'Active in Continuity Pipeline' :
+           'Lifetime value > $' + LTV_CUSTOMER_THRESHOLD) +
+          '). No lead pipeline action taken.\n\n' + (claudeResult.note || '');
+        await addNoteToContact(contact.id, existingNote);
+
+        await fireGHLSummaryWebhook({
+          contact_name: finalContactName || 'Unknown',
+          contact_phone: contactPhone || 'Unknown',
+          contact_id: contact.id,
+          outcome: 'EXISTING CUSTOMER — No Lead Action Taken',
+          call_summary: claudeResult.note || '',
+          pipeline_stage_info: 'Existing customer — no lead pipeline changes made',
+          pipeline_name: 'N/A', previous_stage: 'N/A', new_stage: 'N/A',
+          stage_changed: 'No', opportunity_value_previous: 'N/A', opportunity_value_new: 'N/A',
+          note_added: 'Yes', new_contact_created: isNewContact ? 'Yes' : 'No',
+          new_opportunity_created: customerCheck.reason === 'ltv' ? 'Yes — Retroactive Customer Pipeline' : 'No',
+          name_extracted_from_transcript: claudeResult.extracted_name || 'No',
+          disqualifier_flag: 'None', follow_up_task_created: 'No', follow_up_days: 'None'
+        });
+
+        return res.status(200).json({ success: true, outcome: 'EXISTING_CUSTOMER_NO_ACTION' });
+      }
 
       // Not an existing customer — proceed with lead opportunity creation
       const defaultPipelineId = finalPipelineId;
@@ -2584,8 +2549,7 @@ const EVAL_CUSTOMER_STAGES = {
   PENDING_NO_FIRM_TIME: 'eb8828cb-98c5-4cdd-8510-56a174540a4e',
   PACKAGE_PURCHASED: 'cc3f6b52-846a-4bcc-9cd5-646ca5712ea1',
   NOT_GOOD_TIME: 'f7ce8c60-7695-4da4-8c1b-5a030967647a',
-  CLOSED_LOST: '5b13fe92-130a-4cd6-b9a5-eca5f8ff5729',
-  ACTIVE_PATIENT_SPECIAL_CIRCUMSTANCE: '52fb05ae-4af2-40dc-9264-68e42de8b3ed'
+  CLOSED_LOST: '5b13fe92-130a-4cd6-b9a5-eca5f8ff5729'
 };
 
 // LTV field key from GHL
@@ -2810,13 +2774,20 @@ async function getContactLTV(contactId) {
 }
 
 async function checkExistingCustomer(contactId, allOpportunities) {
-  // Signal 1: Has any opportunity in Customer Pipeline (any stage)
-  const customerOpp = allOpportunities.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID);
-  if (customerOpp) return { isCustomer: true, reason: 'customer_pipeline', opp: customerOpp };
+  // Signal 1: Has opportunity at Package Purchased in Customer Pipeline
+  const hasPackagePurchased = allOpportunities.some(
+    o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID &&
+    o.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED
+  );
+  if (hasPackagePurchased) return { isCustomer: true, reason: 'package_purchased', opp: allOpportunities.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID && o.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED) };
 
   // Signal 2: Has any opportunity in Continuity Pipeline
   const continuityOpp = allOpportunities.find(o => o.pipelineId === CONTINUITY_PIPELINE_ID);
   if (continuityOpp) return { isCustomer: true, reason: 'continuity', opp: continuityOpp };
+
+  // Signal 3: Lifetime value > $500
+  const ltv = await getContactLTV(contactId);
+  if (ltv > LTV_CUSTOMER_THRESHOLD) return { isCustomer: true, reason: 'ltv', opp: null, ltv };
 
   return { isCustomer: false };
 }
@@ -3622,3 +3593,851 @@ app.post('/post-eval', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ============================================================
+// METRICS UPLOAD PAGE
+// ============================================================
+
+const multer = require('multer');
+const csv = require('csv-parse/sync');
+const pdfParse = require('pdf-parse');
+const { google } = require('googleapis');
+
+const metricsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+const CLINIC_METRICS_SHEET_ID = '1ej2f-8W7pE8ydVR6TOOdP246Zmm9hU974FJL0cJJ8sE';
+const POST_EVAL_SHEET_ID = '1z6Y8eRaTNtiwJySGplMUaD-yJwq4M6vkQl2IzM3tJsI';
+
+const PT_TABS = {
+  'Chris Bostwick': 'Chris Bostwick Metrics',
+  'TJ Aquino':      'TJ Aquino Metrics',
+  'John Gan':       'John Gan Metrics',
+  'Jordan McCormack': 'Jordan McCormack Metrics'
+};
+const CLINIC_TAB = 'Clinic Metrics';
+
+// Month name → row offset within a monthly table (Jan=data row 1, Feb=2, etc.)
+const MONTH_ROWS = { Jan:1,Feb:2,Mar:3,Apr:4,May:5,Jun:6,Jul:7,Aug:8,Sep:9,Oct:10,Nov:11,Dec:12 };
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Year → column letter (2021=B, 2022=C, ... 2026=G)
+function yearToCol(year) {
+  const cols = { 2021:'B',2022:'C',2023:'D',2024:'E',2025:'F',2026:'G' };
+  return cols[year] || 'G';
+}
+
+// Week of month (1-5) → column letter (Week1=B, Week2=C, etc.)
+function weekToCol(week) {
+  return ['B','C','D','E','F'][week - 1] || 'B';
+}
+
+// Calculate which week of the month a date falls in (1-5)
+function getWeekOfMonth(date) {
+  const day = date.getDate();
+  return Math.ceil(day / 7);
+}
+
+// Row anchors for each table on Clinic tab and PT tabs
+// Based on screenshots: each table = title row + header row + 12 month rows + blank + Total + Avg + %Growth = 19 rows, tables separated by ~1 blank row
+const TABLE_ANCHORS = {
+  clinic: {
+    totalLeads:          { titleRow: 1,   dataStartRow: 3  }, // Clinic only
+    totalEvals:          { titleRow: 20,  dataStartRow: 22 },
+    totalConversions:    { titleRow: 39,  dataStartRow: 41 },
+    totalVisits:         { titleRow: 58,  dataStartRow: 60 },
+    totalCancels24hr:    { titleRow: 77,  dataStartRow: 79 },
+    totalLateCancels:    { titleRow: 96,  dataStartRow: 98 },
+    totalOpenCharts:     { titleRow: 115, dataStartRow: 117, weekTable: true },
+    totalOverdueTasks:   { titleRow: 134, dataStartRow: 136, weekTable: true }
+  },
+  pt: {
+    totalEvals:          { titleRow: 1,   dataStartRow: 3  },
+    totalConversions:    { titleRow: 20,  dataStartRow: 22 },
+    totalVisits:         { titleRow: 39,  dataStartRow: 41 },
+    totalCancels24hr:    { titleRow: 58,  dataStartRow: 60 },
+    totalLateCancels:    { titleRow: 77,  dataStartRow: 79 },
+    totalOverdueTasks:   { titleRow: 96,  dataStartRow: 98,  weekTable: true },
+    totalOpenCharts:     { titleRow: 115, dataStartRow: 117, weekTable: true }
+  }
+};
+
+function getGoogleSheetsClient() {
+  const saJson = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  const auth = new google.auth.GoogleAuth({
+    credentials: saJson,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  });
+  return google.sheets({ version: 'v4', auth });
+}
+
+// Build A1 notation for a monthly table cell
+function monthlyCell(anchor, monthName, year) {
+  const monthOffset = MONTH_ROWS[monthName];
+  if (!monthOffset) return null;
+  const row = anchor.dataStartRow + monthOffset - 1;
+  const col = yearToCol(year);
+  return `${col}${row}`;
+}
+
+// Build A1 notation for a weekly table cell
+function weeklyCell(anchor, monthName, week) {
+  const monthOffset = MONTH_ROWS[monthName];
+  if (!monthOffset) return null;
+  const row = anchor.dataStartRow + monthOffset - 1;
+  const col = weekToCol(week);
+  return `${col}${row}`;
+}
+
+// Parse GeneralVisitReport CSV → per-PT counts
+function parseGeneralVisitReport(buffer) {
+  const text = buffer.toString('utf8');
+  const lines = text.split('\n').filter(l => l.trim());
+  // Skip header line
+  const data = {};
+  const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
+  for (const pt of PT_NAMES) data[pt] = { evals: 0, visits: 0, continuity: 0 };
+
+  for (const line of lines) {
+    if (line.startsWith('Group By') || !line.trim()) continue;
+    const cols = line.split(',');
+    const provider = cols[4]?.trim().replace(/^"|"$/g,'');
+    const service = cols[5]?.trim().replace(/^"|"$/g,'');
+    if (!provider || !PT_NAMES.includes(provider)) continue;
+    // Count all visits
+    data[provider].visits++;
+    // Evals
+    if (service && (service.toLowerCase().includes('evaluation') || service.includes('$50 Comprehensive'))) {
+      data[provider].evals++;
+    }
+    // Continuity
+    if (service && service.toLowerCase().includes('continuity')) {
+      data[provider].continuity++;
+    }
+  }
+  return data;
+}
+
+// Parse AppointmentMetricsReport CSV → per-PT schedule efficiency
+function parseAppointmentMetrics(buffer) {
+  const text = buffer.toString('utf8');
+  const lines = text.split('\n').filter(l => l.trim());
+  const data = {};
+  for (const line of lines) {
+    if (line.startsWith('Therapist') || !line.trim()) continue;
+    const cols = line.split(',');
+    const therapist = cols[0]?.trim();
+    const pctBooked = cols[3]?.trim().replace('%','');
+    if (therapist && pctBooked) data[therapist] = parseFloat(pctBooked);
+  }
+  return data;
+}
+
+// Parse CancellationReport CSV → per-PT counts split by >24hr and <=24hr
+function parseCancellations(buffer) {
+  const text = buffer.toString('utf8');
+  const lines = text.split('\n').filter(l => l.trim());
+  const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
+  const data = {};
+  for (const pt of PT_NAMES) data[pt] = { over24: 0, lateCancelNoShow: 0 };
+
+  for (const line of lines) {
+    if (line.startsWith('First Name') || !line.trim()) continue;
+    // CSV: First Name,Last Name,Phone,Email,Cancellation Notice,Appointment,Service,Provider,...
+    const cols = line.split(',');
+    const noticeStr = cols[4]?.trim().replace(/^"|"$/g,'').replace(' hrs','');
+    const provider = cols[7]?.trim().replace(/^"|"$/g,'');
+    if (!provider || !PT_NAMES.includes(provider)) continue;
+    const notice = parseFloat(noticeStr);
+    if (isNaN(notice)) continue;
+    if (notice > 24) {
+      data[provider].over24++;
+    } else {
+      data[provider].lateCancelNoShow++;
+    }
+  }
+  return data;
+}
+
+// Parse ChartingReport CSV → per-PT open chart count (excludes Jordan)
+function parseChartingReport(buffer) {
+  const text = buffer.toString('utf8');
+  const lines = text.split('\n').filter(l => l.trim());
+  const data = { 'Chris Bostwick': 0, 'TJ Aquino': 0, 'John Gan': 0 };
+  for (const line of lines) {
+    if (line.startsWith('Group By') || !line.trim()) continue;
+    const cols = line.split(',');
+    const provider = cols[4]?.trim().replace(/^"|"$/g,'');
+    if (data.hasOwnProperty(provider)) data[provider]++;
+  }
+  return data;
+}
+
+// Extract total leads number from GHL PDF using Claude vision
+async function extractLeadsFromPdf(buffer) {
+  try {
+    // First try pdf-parse for text extraction
+    const parsed = await pdfParse(buffer);
+    const text = parsed.text;
+    // Look for a large number pattern — the leads count
+    const match = text.match(/\b(\d{1,4})\b/);
+    if (match) return parseInt(match[1]);
+  } catch(e) { /* fall through to Claude */ }
+
+  // Fallback: send to Claude as base64 image
+  const base64 = buffer.toString('base64');
+  const resp = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 100,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+        { type: 'text', text: 'This is a GHL "Total Leads This Month" report. Return ONLY the total leads number as a plain integer, nothing else.' }
+      ]
+    }]
+  }, {
+    headers: { 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+  });
+  const raw = resp.data.content[0].text.trim();
+  return parseInt(raw.replace(/\D/g,'')) || 0;
+}
+
+// Read post-eval sheet and count conversions by PT for a given month/year
+async function getEvalConversions(month, year) {
+  const sheets = getGoogleSheetsClient();
+  const result = await sheets.spreadsheets.values.get({
+    spreadsheetId: POST_EVAL_SHEET_ID,
+    range: 'Sheet1!A:Z'
+  });
+  const rows = result.data.values || [];
+  if (rows.length < 2) return {};
+
+  const headers = rows[0].map(h => h.toLowerCase().trim());
+  const outcomeIdx = headers.findIndex(h => h.includes('outcome'));
+  const ptIdx = headers.findIndex(h => h.includes('evaluating pt') || h === 'evaluating_pt');
+  const tsIdx = headers.findIndex(h => h.includes('timestamp'));
+
+  const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
+  const counts = {};
+  for (const pt of PT_NAMES) counts[pt] = 0;
+
+  const monthIdx = MONTH_NAMES.indexOf(month);
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const outcome = row[outcomeIdx]?.trim().toLowerCase();
+    const pt = row[ptIdx]?.trim();
+    const ts = row[tsIdx]?.trim();
+    if (!outcome || !pt || !ts) continue;
+    if (!outcome.includes('convert')) continue;
+
+    // Parse timestamp to check month/year
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) continue;
+    if (d.getFullYear() !== year || d.getMonth() !== monthIdx) continue;
+    if (counts.hasOwnProperty(pt)) counts[pt]++;
+  }
+  return counts;
+}
+
+// Write a batch of cell updates to Google Sheets
+async function writeSheetUpdates(updates) {
+  // updates = [{ sheetName, cell, value }]
+  const sheets = getGoogleSheetsClient();
+  const data = updates.map(u => ({
+    range: `${u.sheetName}!${u.cell}`,
+    values: [[u.value]]
+  }));
+  await sheets.spreadsheets.values.batchUpdate({
+    spreadsheetId: CLINIC_METRICS_SHEET_ID,
+    requestBody: { valueInputOption: 'RAW', data }
+  });
+}
+
+// GET /metrics — serve the upload form
+app.get('/metrics', (req, res) => {
+  const now = new Date();
+  const monthName = MONTH_NAMES[now.getMonth()];
+  const year = now.getFullYear();
+  const weekNum = getWeekOfMonth(now);
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Weekly Metrics Upload — Movement Clinic PT</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --teal: #0f6e56;
+    --teal-light: #e6f4f1;
+    --teal-mid: #1a9070;
+    --slate: #1e2a35;
+    --mid: #4a5568;
+    --light: #f7f9f8;
+    --border: #d4e0dc;
+    --white: #ffffff;
+    --red: #dc2626;
+    --amber: #d97706;
+    --green: #059669;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--light);
+    color: var(--slate);
+    min-height: 100vh;
+    padding: 40px 20px 80px;
+  }
+
+  .header {
+    max-width: 720px;
+    margin: 0 auto 40px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .logo-mark {
+    width: 42px; height: 42px;
+    background: var(--teal);
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  .logo-mark svg { width: 22px; height: 22px; fill: white; }
+
+  .header-text h1 {
+    font-size: 18px; font-weight: 600; color: var(--slate);
+    letter-spacing: -0.02em;
+  }
+
+  .header-text p {
+    font-size: 13px; color: var(--mid); margin-top: 2px;
+  }
+
+  .badge {
+    margin-left: auto;
+    background: var(--teal-light);
+    color: var(--teal);
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'DM Mono', monospace;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid #b2d8d0;
+  }
+
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px 32px;
+    max-width: 720px;
+    margin: 0 auto 20px;
+  }
+
+  .card-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--teal);
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--teal-light);
+  }
+
+  .upload-grid {
+    display: grid;
+    gap: 14px;
+  }
+
+  .upload-row {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--light);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    transition: border-color 0.15s;
+  }
+
+  .upload-row:focus-within { border-color: var(--teal-mid); }
+
+  .upload-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--slate);
+  }
+
+  .upload-sub {
+    font-size: 11px;
+    color: var(--mid);
+    margin-top: 2px;
+    font-family: 'DM Mono', monospace;
+  }
+
+  .file-btn {
+    appearance: none;
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 12px;
+    font-family: 'DM Sans', sans-serif;
+    color: var(--mid);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.15s;
+  }
+
+  .file-btn:hover { border-color: var(--teal-mid); color: var(--teal); }
+
+  input[type="file"] { display: none; }
+
+  .task-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .task-table th {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--mid);
+    text-align: left;
+    padding: 0 0 12px;
+  }
+
+  .task-table th:last-child { text-align: right; }
+
+  .task-table td {
+    padding: 10px 0;
+    border-top: 1px solid var(--light);
+  }
+
+  .task-table .pt-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--slate);
+  }
+
+  .task-table .pt-role {
+    font-size: 11px;
+    color: var(--mid);
+    margin-top: 1px;
+  }
+
+  .task-input {
+    width: 90px;
+    text-align: right;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 14px;
+    font-family: 'DM Mono', monospace;
+    color: var(--slate);
+    background: var(--light);
+    display: block;
+    margin-left: auto;
+    transition: border-color 0.15s;
+  }
+
+  .task-input:focus { outline: none; border-color: var(--teal-mid); background: white; }
+
+  .week-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--teal-light);
+    border-radius: 8px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    color: var(--teal);
+  }
+
+  .week-info strong { font-weight: 600; }
+
+  .submit-btn {
+    display: block;
+    width: 100%;
+    max-width: 720px;
+    margin: 30px auto 0;
+    padding: 16px;
+    background: var(--teal);
+    color: white;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 15px;
+    font-weight: 600;
+    border: none;
+    border-radius: 12px;
+    cursor: pointer;
+    letter-spacing: -0.01em;
+    transition: background 0.15s, transform 0.1s;
+  }
+
+  .submit-btn:hover { background: var(--teal-mid); }
+  .submit-btn:active { transform: scale(0.99); }
+  .submit-btn:disabled { background: #9ab5af; cursor: not-allowed; }
+
+  .status-bar {
+    max-width: 720px;
+    margin: 16px auto 0;
+    padding: 14px 20px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    display: none;
+  }
+
+  .status-bar.processing { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; display: block; }
+  .status-bar.success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; display: block; }
+  .status-bar.error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; display: block; }
+
+  .file-chosen { font-size: 11px; color: var(--teal); margin-top: 3px; font-family: 'DM Mono', monospace; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo-mark">
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/>
+    </svg>
+  </div>
+  <div class="header-text">
+    <h1>Weekly Metrics Upload</h1>
+    <p>Movement Clinic Physical Therapy</p>
+  </div>
+  <div class="badge">${monthName} ${year} · Week ${weekNum}</div>
+</div>
+
+<form id="metricsForm" enctype="multipart/form-data">
+  <input type="hidden" name="month" value="${monthName}">
+  <input type="hidden" name="year" value="${year}">
+  <input type="hidden" name="week" value="${weekNum}">
+
+  <!-- Report Uploads -->
+  <div class="card">
+    <div class="card-title">Report Uploads</div>
+    <div class="upload-grid">
+
+      <div class="upload-row">
+        <div>
+          <div class="upload-label">General Visit Report</div>
+          <div class="upload-sub">PTEverywhere · CSV · Visit totals by provider</div>
+          <div class="file-chosen" id="chosen-visits"></div>
+        </div>
+        <label class="file-btn" for="file-visits">Choose file</label>
+        <input type="file" id="file-visits" name="generalVisits" accept=".csv">
+      </div>
+
+      <div class="upload-row">
+        <div>
+          <div class="upload-label">Appointment Metrics Report</div>
+          <div class="upload-sub">PTEverywhere · CSV · Schedule efficiency per provider</div>
+          <div class="file-chosen" id="chosen-appt"></div>
+        </div>
+        <label class="file-btn" for="file-appt">Choose file</label>
+        <input type="file" id="file-appt" name="appointmentMetrics" accept=".csv">
+      </div>
+
+      <div class="upload-row">
+        <div>
+          <div class="upload-label">Cancellation Report</div>
+          <div class="upload-sub">PTEverywhere · CSV · Cancellations and no-shows by provider</div>
+          <div class="file-chosen" id="chosen-cancel"></div>
+        </div>
+        <label class="file-btn" for="file-cancel">Choose file</label>
+        <input type="file" id="file-cancel" name="cancellations" accept=".csv">
+      </div>
+
+      <div class="upload-row">
+        <div>
+          <div class="upload-label">Charting Report</div>
+          <div class="upload-sub">PTEverywhere · CSV · Open charts per provider</div>
+          <div class="file-chosen" id="chosen-charts"></div>
+        </div>
+        <label class="file-btn" for="file-charts">Choose file</label>
+        <input type="file" id="file-charts" name="charting" accept=".csv">
+      </div>
+
+      <div class="upload-row">
+        <div>
+          <div class="upload-label">Total Leads Report</div>
+          <div class="upload-sub">GHL · PDF · Total leads this month</div>
+          <div class="file-chosen" id="chosen-leads"></div>
+        </div>
+        <label class="file-btn" for="file-leads">Choose file</label>
+        <input type="file" id="file-leads" name="leads" accept=".pdf">
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Overdue Tasks Manual Entry -->
+  <div class="card">
+    <div class="card-title">Overdue Tasks — Manual Entry</div>
+
+    <div class="week-info">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Snapshot as of today — <strong>Week ${weekNum} of ${monthName}</strong>. Check GHL Tasks view, filter by assignee, enter the open/overdue count for each provider.
+    </div>
+
+    <table class="task-table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Overdue Tasks</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>
+            <div class="pt-name">Chris Bostwick</div>
+            <div class="pt-role">Physical Therapist</div>
+          </td>
+          <td>
+            <input type="number" class="task-input" name="tasks_chris" min="0" value="0" placeholder="0">
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="pt-name">TJ Aquino</div>
+            <div class="pt-role">Physical Therapist</div>
+          </td>
+          <td>
+            <input type="number" class="task-input" name="tasks_tj" min="0" value="0" placeholder="0">
+          </td>
+        </tr>
+        <tr>
+          <td>
+            <div class="pt-name">John Gan</div>
+            <div class="pt-role">Physical Therapist</div>
+          </td>
+          <td>
+            <input type="number" class="task-input" name="tasks_john" min="0" value="0" placeholder="0">
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <button type="button" class="submit-btn" id="submitBtn" onclick="submitMetrics()">
+    Upload &amp; Update Google Sheet
+  </button>
+  <div class="status-bar" id="statusBar"></div>
+</form>
+
+<script>
+// Show filename when file chosen
+['visits','appt','cancel','charts','leads'].forEach(key => {
+  const input = document.getElementById('file-' + key);
+  const label = document.getElementById('chosen-' + key);
+  if (input && label) {
+    input.addEventListener('change', () => {
+      label.textContent = input.files[0] ? '✓ ' + input.files[0].name : '';
+    });
+  }
+});
+
+async function submitMetrics() {
+  const btn = document.getElementById('submitBtn');
+  const status = document.getElementById('statusBar');
+  btn.disabled = true;
+  btn.textContent = 'Processing...';
+  status.className = 'status-bar processing';
+  status.textContent = '⏳ Uploading reports and updating Google Sheet — this may take 15–30 seconds...';
+
+  const form = document.getElementById('metricsForm');
+  const formData = new FormData(form);
+
+  try {
+    const resp = await fetch('/metrics/submit', { method: 'POST', body: formData });
+    const result = await resp.json();
+    if (resp.ok && result.success) {
+      status.className = 'status-bar success';
+      status.textContent = '✅ Google Sheet updated successfully. ' + (result.summary || '');
+      btn.textContent = 'Upload & Update Google Sheet';
+      btn.disabled = false;
+    } else {
+      throw new Error(result.error || 'Unknown error');
+    }
+  } catch(err) {
+    status.className = 'status-bar error';
+    status.textContent = '❌ Error: ' + err.message;
+    btn.textContent = 'Upload & Update Google Sheet';
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>`);
+});
+
+// POST /metrics/submit — process files and write to Google Sheet
+app.post('/metrics/submit', metricsUpload.fields([
+  { name: 'generalVisits', maxCount: 1 },
+  { name: 'appointmentMetrics', maxCount: 1 },
+  { name: 'cancellations', maxCount: 1 },
+  { name: 'charting', maxCount: 1 },
+  { name: 'leads', maxCount: 1 }
+]), async (req, res) => {
+  try {
+    const { month, year: yearStr, week: weekStr } = req.body;
+    const year = parseInt(yearStr);
+    const week = parseInt(weekStr);
+    const files = req.files || {};
+
+    const updates = [];
+    const summary = [];
+
+    // ── 1. General Visit Report ──────────────────────────────
+    if (files.generalVisits?.[0]) {
+      const visitData = parseGeneralVisitReport(files.generalVisits[0].buffer);
+      let clinicEvals = 0, clinicVisits = 0;
+
+      for (const [pt, counts] of Object.entries(visitData)) {
+        const tab = PT_TABS[pt];
+        if (!tab) continue;
+        const anchors = pt === 'Jordan McCormack' ? TABLE_ANCHORS.clinic : TABLE_ANCHORS.pt;
+
+        // Total Evals — PT tab
+        const evalCell = monthlyCell(TABLE_ANCHORS.pt.totalEvals, month, year);
+        if (evalCell && pt !== 'Jordan McCormack') updates.push({ sheetName: tab, cell: evalCell, value: counts.evals });
+
+        // Total Visits — PT tab
+        const visitCell = monthlyCell(TABLE_ANCHORS.pt.totalVisits, month, year);
+        if (visitCell && pt !== 'Jordan McCormack') updates.push({ sheetName: tab, cell: visitCell, value: counts.visits });
+
+        // Jordan tab gets evals and visits too
+        if (pt === 'Jordan McCormack') {
+          const jEvalCell = monthlyCell(TABLE_ANCHORS.pt.totalEvals, month, year);
+          const jVisitCell = monthlyCell(TABLE_ANCHORS.pt.totalVisits, month, year);
+          if (jEvalCell) updates.push({ sheetName: PT_TABS['Jordan McCormack'], cell: jEvalCell, value: counts.evals });
+          if (jVisitCell) updates.push({ sheetName: PT_TABS['Jordan McCormack'], cell: jVisitCell, value: counts.visits });
+        }
+
+        clinicEvals += counts.evals;
+        clinicVisits += counts.visits;
+      }
+
+      // Clinic tab totals
+      const clinicEvalCell = monthlyCell(TABLE_ANCHORS.clinic.totalEvals, month, year);
+      const clinicVisitCell = monthlyCell(TABLE_ANCHORS.clinic.totalVisits, month, year);
+      if (clinicEvalCell) updates.push({ sheetName: CLINIC_TAB, cell: clinicEvalCell, value: clinicEvals });
+      if (clinicVisitCell) updates.push({ sheetName: CLINIC_TAB, cell: clinicVisitCell, value: clinicVisits });
+      summary.push(`Visits parsed.`);
+    }
+
+    // ── 2. Cancellations ─────────────────────────────────────
+    if (files.cancellations?.[0]) {
+      const cancelData = parseCancellations(files.cancellations[0].buffer);
+      let clinicOver24 = 0, clinicLate = 0;
+
+      for (const [pt, counts] of Object.entries(cancelData)) {
+        const tab = PT_TABS[pt];
+        if (!tab) continue;
+
+        const over24Cell = monthlyCell(TABLE_ANCHORS.pt.totalCancels24hr, month, year);
+        const lateCell = monthlyCell(TABLE_ANCHORS.pt.totalLateCancels, month, year);
+        if (over24Cell) updates.push({ sheetName: tab, cell: over24Cell, value: counts.over24 });
+        if (lateCell) updates.push({ sheetName: tab, cell: lateCell, value: counts.lateCancelNoShow });
+
+        clinicOver24 += counts.over24;
+        clinicLate += counts.lateCancelNoShow;
+      }
+
+      const cOver24Cell = monthlyCell(TABLE_ANCHORS.clinic.totalCancels24hr, month, year);
+      const cLateCell = monthlyCell(TABLE_ANCHORS.clinic.totalLateCancels, month, year);
+      if (cOver24Cell) updates.push({ sheetName: CLINIC_TAB, cell: cOver24Cell, value: clinicOver24 });
+      if (cLateCell) updates.push({ sheetName: CLINIC_TAB, cell: cLateCell, value: clinicLate });
+      summary.push(`Cancellations parsed.`);
+    }
+
+    // ── 3. Charting Report (Open Charts) — weekly ────────────
+    if (files.charting?.[0]) {
+      const chartData = parseChartingReport(files.charting[0].buffer);
+      let clinicCharts = 0;
+
+      for (const [pt, count] of Object.entries(chartData)) {
+        const tab = PT_TABS[pt];
+        if (!tab) continue;
+        const cell = weeklyCell(TABLE_ANCHORS.pt.totalOpenCharts, month, week);
+        if (cell) updates.push({ sheetName: tab, cell, value: count });
+        clinicCharts += count;
+      }
+
+      const clinicChartCell = weeklyCell(TABLE_ANCHORS.clinic.totalOpenCharts, month, week);
+      if (clinicChartCell) updates.push({ sheetName: CLINIC_TAB, cell: clinicChartCell, value: clinicCharts });
+      summary.push(`Open charts parsed.`);
+    }
+
+    // ── 4. Leads PDF ─────────────────────────────────────────
+    if (files.leads?.[0]) {
+      const leadCount = await extractLeadsFromPdf(files.leads[0].buffer);
+      const leadsCell = monthlyCell(TABLE_ANCHORS.clinic.totalLeads, month, year);
+      if (leadsCell) updates.push({ sheetName: CLINIC_TAB, cell: leadsCell, value: leadCount });
+      summary.push(`Leads: ${leadCount}.`);
+    }
+
+    // ── 5. Overdue Tasks (manual entry) — weekly ─────────────
+    const taskMap = {
+      'Chris Bostwick': parseInt(req.body.tasks_chris) || 0,
+      'TJ Aquino':      parseInt(req.body.tasks_tj) || 0,
+      'John Gan':       parseInt(req.body.tasks_john) || 0
+    };
+    let clinicTasks = 0;
+    for (const [pt, count] of Object.entries(taskMap)) {
+      const tab = PT_TABS[pt];
+      const cell = weeklyCell(TABLE_ANCHORS.pt.totalOverdueTasks, month, week);
+      if (cell) updates.push({ sheetName: tab, cell, value: count });
+      clinicTasks += count;
+    }
+    const clinicTaskCell = weeklyCell(TABLE_ANCHORS.clinic.totalOverdueTasks, month, week);
+    if (clinicTaskCell) updates.push({ sheetName: CLINIC_TAB, cell: clinicTaskCell, value: clinicTasks });
+
+    // ── 6. Eval Conversions (from post-eval sheet) ────────────
+    try {
+      const conversionData = await getEvalConversions(month, year);
+      let clinicConversions = 0;
+      for (const [pt, count] of Object.entries(conversionData)) {
+        const tab = PT_TABS[pt];
+        if (!tab) continue;
+        const cell = monthlyCell(TABLE_ANCHORS.pt.totalConversions, month, year);
+        if (cell) updates.push({ sheetName: tab, cell, value: count });
+        clinicConversions += count;
+      }
+      const clinicConvCell = monthlyCell(TABLE_ANCHORS.clinic.totalConversions, month, year);
+      if (clinicConvCell) updates.push({ sheetName: CLINIC_TAB, cell: clinicConvCell, value: clinicConversions });
+      summary.push(`Conversions: ${clinicConversions} total.`);
+    } catch(convErr) {
+      console.error('Failed to fetch eval conversions:', convErr.message);
+    }
+
+    // ── 7. Write all updates to Google Sheet ─────────────────
+    if (updates.length > 0) {
+      await writeSheetUpdates(updates);
+    }
+
+    res.json({
+      success: true,
+      updatesWritten: updates.length,
+      summary: `${updates.length} cells updated. ${summary.join(' ')}`
+    });
+
+  } catch (err) {
+    console.error('Metrics submit error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
