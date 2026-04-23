@@ -1875,9 +1875,19 @@ tbody td:first-child{font-weight:700}
 <div class="container" style="padding-top:24px">
   <div class="tabs">
     <div class="tab active" onclick="showPage('weekly')">📋 Weekly Meeting</div>
-    <div class="tab" onclick="showPage('mom')">📅 Month over Month</div>
-    <div class="tab" onclick="showPage('yoy')">📈 Year over Year</div>
+    <div class="tab mom-tab" onclick="showPage('mom')">📅 Month over Month</div>
+    <div class="tab yoy-tab" onclick="showPage('yoy')">📈 Year over Year</div>
   </div>
+  <script>
+    (function() {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('view') === 'weekly') {
+        document.querySelectorAll('.mom-tab, .yoy-tab').forEach(el => el.style.display = 'none');
+        document.getElementById('page-mom').style.display = 'none';
+        document.getElementById('page-yoy').style.display = 'none';
+      }
+    })();
+  </script>
 
   <!-- ══════════════ PAGE 1: WEEKLY MEETING ══════════════ -->
   <div class="page active" id="page-weekly">
@@ -4775,6 +4785,7 @@ async function writeSheetUpdates(updates) {
   });
 }
 
+
 // GET /metrics — serve the upload form
 app.get('/metrics', (req, res) => {
   const now = new Date();
@@ -5698,6 +5709,63 @@ app.post('/metrics/submit', metricsUpload.fields([
           console.error(`Failed to send open charts email to ${ptEmail}:`, emailErr.message);
         }
       }
+    }
+
+    // ── 9. Send scorecard DM to each PT via Slack ───────────────
+    try {
+      const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+        ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+        : 'https://movement-clinic-webhook-production.up.railway.app';
+
+      const PT_SCORECARD_SLACK = {
+        'Chris Bostwick': 'U091NMDKTFV',
+        'TJ Aquino':      'U0A9DL4RTKN',
+        'John Gan':       'U07TJC6GZFG'
+      };
+
+      const dmText = [
+        'Hey team! Your weekly/monthly metrics have been updated in preparation for the meeting. Take a look to see where you\'re at!',
+        '',
+        '*KPI Goals:*',
+        '• Conversion Rate: >60%',
+        '• Total Visits: >120/month',
+        '• % Continuity: >20%',
+        '• Cancellation Rate: <14%',
+        '• Open Charts: <10',
+        '• Overdue Tasks: 0'
+      ].join('\n');
+
+      for (const [pt, slackId] of Object.entries(PT_SCORECARD_SLACK)) {
+        const url = `${BASE_URL}/dashboard?view=weekly`;
+        try {
+          await axios.post('https://slack.com/api/chat.postMessage', {
+            channel: slackId,
+            text: 'Your weekly metrics have been updated!',
+            blocks: [
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: dmText }
+              },
+              {
+                type: 'actions',
+                elements: [{
+                  type: 'button',
+                  text: { type: 'plain_text', text: 'Click Here for Your Metrics' },
+                  url,
+                  style: 'primary'
+                }]
+              }
+            ]
+          }, {
+            headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' }
+          });
+          console.log(`Scorecard DM sent to ${pt}`);
+        } catch(dmErr) {
+          console.error(`Failed to send scorecard DM to ${pt}:`, dmErr.message);
+        }
+      }
+    } catch(dmBatchErr) {
+      console.error('Scorecard DM batch error:', dmBatchErr.message);
     }
 
     res.json({
