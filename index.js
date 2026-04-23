@@ -1682,6 +1682,7 @@ app.get('/dashboard', async (req, res) => {
     function getClinicMonth(month, year) {
       const a = TABLE_ANCHORS.clinic;
       const nc = notionConvForMonth(month, year);
+      const isCurrentSnap = latestMetrics && latestMetrics.month === month && latestMetrics.year === year;
       return {
         leads:        monthlyVal(clinicRows, a.totalLeads, month, year) || 0,
         evals:        monthlyVal(clinicRows, a.totalEvals, month, year) || 0,
