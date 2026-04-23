@@ -4447,6 +4447,10 @@ async function parseGeneralVisitReport(buffer) {
     } else if (typeof dosRaw === 'string' && dosRaw.trim()) {
       dos = new Date(dosRaw);
     }
+    // Temporary debug — log first 5 rows to Railway logs so we can see what ExcelJS returns
+    if (rows.indexOf(row) < 5) {
+      console.log('[DOS DEBUG] raw:', dosRaw, 'type:', typeof dosRaw, 'parsed:', dos, 'provider:', row[4], 'service:', row[5]);
+    }
 
     if (!provider || !PT_NAMES.includes(provider)) continue;
     if (!service) continue;
