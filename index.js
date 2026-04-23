@@ -1841,7 +1841,7 @@ body{font-family:'Montserrat','Segoe UI',Arial,sans-serif;background:#F7F8FA;col
 .clinic-card .card-key{color:#9CA3AF}
 .clinic-card .card-val{color:#fff}
 .clinic-card .card-row{border-bottom-color:#333}
-.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:inherit;font-weight:700}
 .badge.red{background:#fef2f2;color:#dc2626}
 .badge.yellow{background:#fffbeb;color:#92400e}
 .badge.green{background:#dcfce7;color:#166534}
