@@ -1417,6 +1417,503 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /dashboard-data — returns all clinic metrics as JSON (PIN protected)
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/dashboard-data', async (req, res) => {
+  if (req.query.pin !== '2365') return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const sheets = getGoogleSheetsClient();
+    const SHEET_ID = CLINIC_METRICS_SHEET_ID;
+    const PT_LIST = ['Chris Bostwick', 'TJ Aquino', 'John Gan', 'Jordan McCormack'];
+    const YEARS = [2021, 2022, 2023, 2024, 2025, 2026];
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+    // Fetch all tabs in one batch
+    const tabNames = [CLINIC_TAB, ...Object.values(PT_TABS)];
+    const ranges = tabNames.map(t => `'${t}'!A1:H200`);
+    const batchResult = await sheets.spreadsheets.values.batchGet({ spreadsheetId: SHEET_ID, ranges });
+    const tabData = {};
+    batchResult.data.valueRanges.forEach((vr, i) => {
+      tabData[tabNames[i]] = vr.values || [];
+    });
+
+    function cellVal(rows, rowIdx, colLetter) {
+      const colIdx = colLetter.charCodeAt(0) - 65; // A=0, B=1...
+      const row = rows[rowIdx - 1];
+      if (!row) return null;
+      const v = row[colIdx];
+      return v !== undefined && v !== '' ? Number(v) || 0 : null;
+    }
+
+    function monthlyVal(rows, anchor, monthName, year) {
+      const monthOffset = MONTH_ROWS[monthName];
+      if (!monthOffset) return null;
+      const row = anchor.dataStartRow + monthOffset - 1;
+      const col = yearToCol(year);
+      return cellVal(rows, row, col);
+    }
+
+    function weeklyVals(rows, anchor, monthName) {
+      const monthOffset = MONTH_ROWS[monthName];
+      if (!monthOffset) return [null, null, null, null, null];
+      const row = anchor.dataStartRow + monthOffset - 1;
+      return ['B','C','D','E','F'].map(col => cellVal(rows, row, col));
+    }
+
+    // Build monthly data per PT and clinic
+    const data = { clinic: {}, pts: {}, meta: { generatedAt: new Date().toISOString() } };
+
+    // Clinic tab
+    const clinicRows = tabData[CLINIC_TAB];
+    data.clinic = {};
+    for (const month of MONTHS) {
+      data.clinic[month] = {};
+      for (const year of YEARS) {
+        const leads     = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalLeads, month, year);
+        const evals     = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalEvals, month, year);
+        const convs     = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalConversions, month, year);
+        const visits    = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalVisits, month, year);
+        const over24    = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalCancels24hr, month, year);
+        const late      = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalLateCancels, month, year);
+        const charts    = weeklyVals(clinicRows, TABLE_ANCHORS.clinic.totalOpenCharts, month);
+        const tasks     = weeklyVals(clinicRows, TABLE_ANCHORS.clinic.totalOverdueTasks, month);
+        if ([leads,evals,visits,over24,late].every(v => v === null)) continue;
+        data.clinic[month][year] = { leads, evals, convs, visits, over24, late, charts, tasks };
+      }
+    }
+
+    // PT tabs
+    for (const pt of PT_LIST) {
+      const tab = PT_TABS[pt];
+      const rows = tabData[tab];
+      data.pts[pt] = {};
+      for (const month of MONTHS) {
+        data.pts[pt][month] = {};
+        for (const year of YEARS) {
+          const anchors = TABLE_ANCHORS.pt;
+          const evals  = monthlyVal(rows, anchors.totalEvals, month, year);
+          const convs  = monthlyVal(rows, anchors.totalConversions, month, year);
+          const visits = monthlyVal(rows, anchors.totalVisits, month, year);
+          const over24 = monthlyVal(rows, anchors.totalCancels24hr, month, year);
+          const late   = monthlyVal(rows, anchors.totalLateCancels, month, year);
+          const charts = weeklyVals(rows, anchors.totalOpenCharts, month);
+          const tasks  = weeklyVals(rows, anchors.totalOverdueTasks, month);
+          if ([evals,visits,over24,late].every(v => v === null)) continue;
+          data.pts[pt][month][year] = { evals, convs, visits, over24, late, charts, tasks };
+        }
+      }
+    }
+
+    res.json(data);
+  } catch (err) {
+    console.error('Dashboard data error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /dashboard — live HTML dashboard (PIN protected)
+// ─────────────────────────────────────────────────────────────────────────────
+app.get('/dashboard', async (req, res) => {
+  if (req.query.pin !== '2365') {
+    return res.send(`<!DOCTYPE html><html><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#F7F8FA">
+      <div style="text-align:center">
+        <div style="font-size:32px;margin-bottom:16px">🔒</div>
+        <form><input name="pin" type="password" placeholder="Enter PIN" style="padding:10px 16px;border:1px solid #e5e7eb;border-radius:6px;font-size:14px;margin-right:8px">
+        <button type="submit" style="padding:10px 20px;background:#232323;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer">Enter</button></form>
+      </div></body></html>`);
+  }
+
+  try {
+    const sheets = getGoogleSheetsClient();
+    const YEARS = [2021,2022,2023,2024,2025,2026];
+    const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const PT_LIST = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
+    const PIN = '2365';
+
+    // Fetch all sheet data
+    const tabNames = [CLINIC_TAB, ...Object.values(PT_TABS)];
+    const batchResult = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId: CLINIC_METRICS_SHEET_ID,
+      ranges: tabNames.map(t => `'${t}'!A1:H200`)
+    });
+    const tabData = {};
+    batchResult.data.valueRanges.forEach((vr, i) => { tabData[tabNames[i]] = vr.values || []; });
+
+    function cellVal(rows, rowIdx, colLetter) {
+      const colIdx = colLetter.charCodeAt(0) - 65;
+      const row = rows[rowIdx - 1];
+      if (!row) return null;
+      const v = row[colIdx];
+      return v !== undefined && v !== '' ? (Number(v) || 0) : null;
+    }
+    function monthlyVal(rows, anchor, monthName, year) {
+      const mo = MONTH_ROWS[monthName]; if (!mo) return null;
+      return cellVal(rows, anchor.dataStartRow + mo - 1, yearToCol(year));
+    }
+    function weeklyVals(rows, anchor, monthName) {
+      const mo = MONTH_ROWS[monthName]; if (!mo) return [null,null,null,null,null];
+      const row = anchor.dataStartRow + mo - 1;
+      return ['B','C','D','E','F'].map(col => cellVal(rows, row, col));
+    }
+    function lastWeekVal(vals) {
+      for (let i = vals.length - 1; i >= 0; i--) { if (vals[i] !== null) return vals[i]; }
+      return 0;
+    }
+
+    // Find current month/year with data
+    const now = new Date();
+    let curYear = now.getFullYear(), curMonthIdx = now.getMonth();
+    const curMonth = MONTHS[curMonthIdx];
+    const clinicRows = tabData[CLINIC_TAB];
+
+    // Pull current month data per PT
+    function getPTMonth(pt, month, year) {
+      const rows = tabData[PT_TABS[pt]];
+      const a = TABLE_ANCHORS.pt;
+      return {
+        evals:  monthlyVal(rows, a.totalEvals, month, year) || 0,
+        convs:  monthlyVal(rows, a.totalConversions, month, year) || 0,
+        visits: monthlyVal(rows, a.totalVisits, month, year) || 0,
+        over24: monthlyVal(rows, a.totalCancels24hr, month, year) || 0,
+        late:   monthlyVal(rows, a.totalLateCancels, month, year) || 0,
+        charts: lastWeekVal(weeklyVals(rows, a.totalOpenCharts, month)),
+        tasks:  lastWeekVal(weeklyVals(rows, a.totalOverdueTasks, month)),
+      };
+    }
+
+    function getClinicMonth(month, year) {
+      const a = TABLE_ANCHORS.clinic;
+      return {
+        leads:  monthlyVal(clinicRows, a.totalLeads, month, year) || 0,
+        evals:  monthlyVal(clinicRows, a.totalEvals, month, year) || 0,
+        convs:  monthlyVal(clinicRows, a.totalConversions, month, year) || 0,
+        visits: monthlyVal(clinicRows, a.totalVisits, month, year) || 0,
+        over24: monthlyVal(clinicRows, a.totalCancels24hr, month, year) || 0,
+        late:   monthlyVal(clinicRows, a.totalLateCancels, month, year) || 0,
+        charts: lastWeekVal(weeklyVals(clinicRows, a.totalOpenCharts, month)),
+        tasks:  lastWeekVal(weeklyVals(clinicRows, a.totalOverdueTasks, month)),
+      };
+    }
+
+    function cancelRate(d) {
+      if (!d.visits) return null;
+      return ((d.over24 + d.late) / d.visits * 100);
+    }
+    function cancelBadge(rate) {
+      if (rate === null) return '<span style="color:#6b7280">—</span>';
+      const pct = rate.toFixed(1) + '%';
+      if (rate >= 15) return `<span class="badge red">${pct}</span>`;
+      if (rate >= 13) return `<span class="badge yellow">${pct}</span>`;
+      return `<span class="badge green">${pct}</span>`;
+    }
+    function schedEff(pt) {
+      // From appointment metrics — not in sheet, show — for now
+      return '—';
+    }
+    function n(v) { return v ?? 0; }
+
+    // Current month PT data
+    const ptData = {};
+    for (const pt of PT_LIST) ptData[pt] = getPTMonth(pt, curMonth, curYear);
+    const clinicCur = getClinicMonth(curMonth, curYear);
+
+    // Clinic excl Jordan (for efficiency)
+    const exJordan = ['Chris Bostwick','TJ Aquino','John Gan'];
+    const exJVisits = exJordan.reduce((s,pt) => s + ptData[pt].visits, 0);
+    const exJCancels = exJordan.reduce((s,pt) => s + ptData[pt].over24 + ptData[pt].late, 0);
+    const exJRate = exJVisits ? (exJCancels / exJVisits * 100) : null;
+
+    // Month-over-month table — all months with any data
+    const momRows = [];
+    for (const year of YEARS) {
+      for (const month of MONTHS) {
+        const d = getClinicMonth(month, year);
+        if (!d.visits && !d.evals) continue;
+        const rate = cancelRate(d);
+        momRows.push({ month, year, ...d, rate });
+      }
+    }
+
+    // Year summaries
+    const yearSummaries = {};
+    for (const year of YEARS) {
+      let tot = { visits:0, evals:0, convs:0, over24:0, late:0, leads:0, months:0 };
+      for (const month of MONTHS) {
+        const d = getClinicMonth(month, year);
+        if (!d.visits && !d.evals) continue;
+        tot.visits += d.visits; tot.evals += d.evals; tot.convs += d.convs;
+        tot.over24 += d.over24; tot.late += d.late; tot.leads += d.leads; tot.months++;
+      }
+      if (tot.months > 0) yearSummaries[year] = tot;
+    }
+
+    const COLORS = { dark:'#232323', yellow:'#FFD70A', blue:'#0065A3', bg:'#F7F8FA', border:'#e5e7eb', mid:'#6b7280' };
+    const PT_COLORS = {
+      'Chris Bostwick': '#0065A3',
+      'TJ Aquino': '#166534',
+      'John Gan': '#92400e',
+      'Jordan McCormack': '#4b5563'
+    };
+
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Movement Clinic — Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Montserrat','Segoe UI',Arial,sans-serif;background:#F7F8FA;color:#232323;font-size:12px}
+.topbar{background:#232323;border-bottom:3px solid #FFD70A;padding:14px 0}
+.topbar-inner{max-width:1100px;margin:0 auto;padding:0 40px;display:flex;align-items:center;justify-content:space-between}
+.topbar h1{color:#fff;font-size:18px;font-weight:700}
+.topbar .sub{color:#9CA3AF;font-size:11px;margin-top:2px}
+.tabs{display:flex;gap:0;border-bottom:2px solid #e5e7eb;margin-bottom:28px}
+.tab{padding:10px 24px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;cursor:pointer;color:#6b7280;border-bottom:3px solid transparent;margin-bottom:-2px;transition:all .15s}
+.tab.active{color:#0065A3;border-bottom-color:#0065A3}
+.tab:hover{color:#232323}
+.page{display:none}.page.active{display:block}
+.container{max-width:1100px;margin:0 auto;padding:0 40px 60px}
+.section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:#0065A3;border-bottom:2px solid #0065A3;padding-bottom:5px;margin-bottom:14px;margin-top:28px}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px}
+.card-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6b7280;margin-bottom:6px}
+.card-name{font-size:13px;font-weight:700;color:#232323;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid}
+.card-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #f3f4f6}
+.card-row:last-child{border-bottom:none}
+.card-key{color:#6b7280;font-weight:500}
+.card-val{font-weight:700;color:#232323}
+.clinic-card{background:#232323;border-color:#232323;color:#fff}
+.clinic-card .card-label{color:#9CA3AF}
+.clinic-card .card-name{color:#FFD70A;border-bottom-color:#FFD70A}
+.clinic-card .card-key{color:#9CA3AF}
+.clinic-card .card-val{color:#fff}
+.clinic-card .card-row{border-bottom-color:#333}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700}
+.badge.red{background:#fef2f2;color:#dc2626}
+.badge.yellow{background:#fffbeb;color:#92400e}
+.badge.green{background:#dcfce7;color:#166534}
+table{width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;margin-bottom:20px}
+thead th{background:#232323;color:#fff;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.8px;padding:8px 12px;text-align:left}
+tbody tr:nth-child(even){background:#F7F8FA}
+tbody tr:nth-child(odd){background:#fff}
+tbody td{padding:7px 12px;font-size:11px;font-weight:500;border-bottom:1px solid #e5e7eb;vertical-align:middle}
+tbody tr:last-child td{border-bottom:none}
+tbody td:first-child{font-weight:700}
+.updated{font-size:10px;color:#9CA3AF;margin-bottom:20px}
+.yr-summary{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-bottom:24px}
+.yr-card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:12px 14px}
+.yr-card-year{font-size:16px;font-weight:700;color:#232323;margin-bottom:6px}
+.yr-card-row{display:flex;justify-content:space-between;font-size:11px;padding:2px 0}
+.yr-card-key{color:#6b7280}
+.yr-card-val{font-weight:700}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="topbar-inner">
+    <div>
+      <div style="color:#9CA3AF;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;margin-bottom:3px">Movement Clinic Physical Therapy</div>
+      <h1>Clinic Performance Dashboard</h1>
+    </div>
+    <div class="sub">Updated ${new Date().toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}</div>
+  </div>
+</div>
+
+<div class="container" style="padding-top:24px">
+  <div class="tabs">
+    <div class="tab active" onclick="showPage('weekly')">📋 Weekly Meeting</div>
+    <div class="tab" onclick="showPage('mom')">📅 Month over Month</div>
+    <div class="tab" onclick="showPage('yoy')">📈 Year over Year</div>
+  </div>
+
+  <!-- ══════════════ PAGE 1: WEEKLY MEETING ══════════════ -->
+  <div class="page active" id="page-weekly">
+    <div class="section-title">${curMonth} ${curYear} — Provider Snapshot</div>
+    <div class="cards">
+      ${[...exJordan, 'Jordan McCormack'].map(pt => {
+        const d = ptData[pt];
+        const rate = cancelRate(d);
+        const isJordan = pt === 'Jordan McCormack';
+        return `<div class="card">
+          <div class="card-label">${isJordan ? 'Owner / PT' : 'Physical Therapist'}</div>
+          <div class="card-name" style="border-color:${PT_COLORS[pt]}">${pt}</div>
+          <div class="card-row"><span class="card-key">Visits</span><span class="card-val">${n(d.visits)}</span></div>
+          <div class="card-row"><span class="card-key">Evals</span><span class="card-val">${n(d.evals)}</span></div>
+          <div class="card-row"><span class="card-key">Conversions</span><span class="card-val">${n(d.convs)}</span></div>
+          <div class="card-row"><span class="card-key">Cancel Rate</span><span class="card-val">${cancelBadge(rate)}</span></div>
+          <div class="card-row"><span class="card-key">&gt;24hr Cancels</span><span class="card-val">${n(d.over24)}</span></div>
+          <div class="card-row"><span class="card-key">Late/No-Show</span><span class="card-val">${n(d.late)}</span></div>
+          ${!isJordan ? `<div class="card-row"><span class="card-key">Open Charts</span><span class="card-val">${n(d.charts)}</span></div>
+          <div class="card-row"><span class="card-key">Overdue Tasks</span><span class="card-val">${n(d.tasks)}</span></div>` : ''}
+        </div>`;
+      }).join('')}
+      <div class="card clinic-card">
+        <div class="card-label">Clinic Total</div>
+        <div class="card-name">Movement Clinic</div>
+        <div class="card-row"><span class="card-key">Total Leads</span><span class="card-val">${n(clinicCur.leads)}</span></div>
+        <div class="card-row"><span class="card-key">Total Visits</span><span class="card-val">${n(clinicCur.visits)}</span></div>
+        <div class="card-row"><span class="card-key">Total Evals</span><span class="card-val">${n(clinicCur.evals)}</span></div>
+        <div class="card-row"><span class="card-key">Total Conversions</span><span class="card-val">${n(clinicCur.convs)}</span></div>
+        <div class="card-row"><span class="card-key">Cancel Rate (ex Jordan)</span><span class="card-val">${cancelBadge(exJRate)}</span></div>
+        <div class="card-row"><span class="card-key">Open Charts</span><span class="card-val">${n(clinicCur.charts)}</span></div>
+        <div class="card-row"><span class="card-key">Overdue Tasks</span><span class="card-val">${n(clinicCur.tasks)}</span></div>
+      </div>
+    </div>
+
+    <div class="section-title">Visit Breakdown by Provider</div>
+    <table>
+      <thead><tr>
+        <th>Provider</th><th>Total Visits</th><th>Evals</th><th>Conversions</th><th>&gt;24hr Cancels</th><th>Late / No-Show</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
+      </tr></thead>
+      <tbody>
+        ${PT_LIST.map(pt => {
+          const d = ptData[pt];
+          const rate = cancelRate(d);
+          return `<tr>
+            <td style="color:${PT_COLORS[pt]}">${pt}</td>
+            <td>${n(d.visits)}</td><td>${n(d.evals)}</td><td>${n(d.convs)}</td>
+            <td>${n(d.over24)}</td><td>${n(d.late)}</td>
+            <td>${cancelBadge(rate)}</td>
+            <td>${pt !== 'Jordan McCormack' ? n(d.charts) : '—'}</td>
+            <td>${pt !== 'Jordan McCormack' ? n(d.tasks) : '—'}</td>
+          </tr>`;
+        }).join('')}
+        <tr style="background:#232323;color:#fff;font-weight:700">
+          <td style="color:#FFD70A">Clinic Total</td>
+          <td>${n(clinicCur.visits)}</td><td>${n(clinicCur.evals)}</td><td>${n(clinicCur.convs)}</td>
+          <td>${n(clinicCur.over24)}</td><td>${n(clinicCur.late)}</td>
+          <td>${cancelBadge(exJRate)}</td>
+          <td>${n(clinicCur.charts)}</td><td>${n(clinicCur.tasks)}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ══════════════ PAGE 2: MONTH OVER MONTH ══════════════ -->
+  <div class="page" id="page-mom">
+    <div class="section-title">Month over Month — Clinic Summary</div>
+    <table>
+      <thead><tr>
+        <th>Month</th><th>Year</th><th>Leads</th><th>Visits</th><th>Evals</th><th>Conversions</th><th>&gt;24hr</th><th>Late/NS</th><th>Cancel Rate</th>
+      </tr></thead>
+      <tbody>
+        ${momRows.map((r, i) => {
+          const prev = momRows[i - 1];
+          const visitChg = prev && prev.visits ? ((r.visits - prev.visits) / prev.visits * 100) : null;
+          const rateChg = prev && prev.rate != null && r.rate != null ? (r.rate - prev.rate) : null;
+          const chgBadge = (v, invert = false) => {
+            if (v === null) return '';
+            const good = invert ? v < 0 : v > 0;
+            const color = good ? '#166534' : '#dc2626';
+            return `<span style="color:${color};font-size:10px;margin-left:4px">${v > 0 ? '▲' : '▼'}${Math.abs(v).toFixed(1)}%</span>`;
+          };
+          return `<tr>
+            <td>${r.month}</td><td>${r.year}</td>
+            <td>${n(r.leads)}</td>
+            <td>${n(r.visits)}${chgBadge(visitChg)}</td>
+            <td>${n(r.evals)}</td>
+            <td>${n(r.convs)}</td>
+            <td>${n(r.over24)}</td>
+            <td>${n(r.late)}</td>
+            <td>${cancelBadge(r.rate)}${chgBadge(rateChg, true)}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+
+    <div class="section-title">Month over Month — By Provider</div>
+    ${PT_LIST.map(pt => {
+      const ptMomRows = [];
+      for (const year of YEARS) {
+        for (const month of MONTHS) {
+          const d = getPTMonth(pt, month, year);
+          if (!d.visits && !d.evals) continue;
+          ptMomRows.push({ month, year, ...d, rate: cancelRate(d) });
+        }
+      }
+      if (!ptMomRows.length) return '';
+      return `<div style="margin-bottom:20px">
+        <div style="font-size:11px;font-weight:700;color:${PT_COLORS[pt]};margin-bottom:8px">${pt}</div>
+        <table>
+          <thead><tr><th>Month</th><th>Year</th><th>Visits</th><th>Evals</th><th>Convs</th><th>&gt;24hr</th><th>Late/NS</th><th>Cancel Rate</th></tr></thead>
+          <tbody>
+            ${ptMomRows.map(r => `<tr>
+              <td>${r.month}</td><td>${r.year}</td>
+              <td>${n(r.visits)}</td><td>${n(r.evals)}</td><td>${n(r.convs)}</td>
+              <td>${n(r.over24)}</td><td>${n(r.late)}</td><td>${cancelBadge(r.rate)}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    }).join('')}
+  </div>
+
+  <!-- ══════════════ PAGE 3: YEAR OVER YEAR ══════════════ -->
+  <div class="page" id="page-yoy">
+    <div class="section-title">Year over Year — Clinic Totals</div>
+    <div class="yr-summary">
+      ${Object.entries(yearSummaries).map(([year, d]) => {
+        const rate = d.visits ? ((d.over24 + d.late) / d.visits * 100) : null;
+        return `<div class="yr-card">
+          <div class="yr-card-year">${year}</div>
+          <div class="yr-card-row"><span class="yr-card-key">Visits</span><span class="yr-card-val">${n(d.visits)}</span></div>
+          <div class="yr-card-row"><span class="yr-card-key">Evals</span><span class="yr-card-val">${n(d.evals)}</span></div>
+          <div class="yr-card-row"><span class="yr-card-key">Convs</span><span class="yr-card-val">${n(d.convs)}</span></div>
+          <div class="yr-card-row"><span class="yr-card-key">Leads</span><span class="yr-card-val">${n(d.leads)}</span></div>
+          <div class="yr-card-row"><span class="yr-card-key">Cancel Rate</span><span class="yr-card-val">${rate !== null ? rate.toFixed(1)+'%' : '—'}</span></div>
+          <div class="yr-card-row"><span class="yr-card-key">Months</span><span class="yr-card-val">${d.months}</span></div>
+        </div>`;
+      }).join('')}
+    </div>
+
+    <div class="section-title">Year over Year — Comparison Table</div>
+    <table>
+      <thead><tr><th>Year</th><th>Total Visits</th><th>Total Evals</th><th>Conversions</th><th>Leads</th><th>Cancels &gt;24hr</th><th>Late/NS</th><th>Cancel Rate</th><th>Months of Data</th></tr></thead>
+      <tbody>
+        ${Object.entries(yearSummaries).map(([year, d], i, arr) => {
+          const rate = d.visits ? ((d.over24 + d.late) / d.visits * 100) : null;
+          const prev = i > 0 ? arr[i-1][1] : null;
+          const visitGrowth = prev && prev.visits ? ((d.visits - prev.visits) / prev.visits * 100) : null;
+          const arrow = (v) => {
+            if (v === null) return '';
+            const col = v >= 0 ? '#166534' : '#dc2626';
+            return `<span style="color:${col};font-size:10px;margin-left:4px">${v >= 0 ? '▲' : '▼'}${Math.abs(v).toFixed(1)}%</span>`;
+          };
+          return `<tr>
+            <td style="font-weight:700">${year}</td>
+            <td>${n(d.visits)}${arrow(visitGrowth)}</td>
+            <td>${n(d.evals)}</td><td>${n(d.convs)}</td><td>${n(d.leads)}</td>
+            <td>${n(d.over24)}</td><td>${n(d.late)}</td>
+            <td>${cancelBadge(rate)}</td>
+            <td>${d.months}</td>
+          </tr>`;
+        }).join('')}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body></html>`;
+
+    res.send(html);
+  } catch (err) {
+    console.error('Dashboard error:', err.message);
+    res.status(500).send('<pre>Dashboard error: ' + err.message + '</pre>');
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on port ${PORT}`); });
 
