@@ -1483,6 +1483,15 @@ app.get('/dashboard-data', async (req, res) => {
       return ['B','C','D','E','F'].map(col => cellVal(rows, row, col));
     }
 
+    // Fetch Notion conversions
+    let notionConvData = {};
+    try { notionConvData = await getAllConversions(); } catch(e) { console.error('Notion fetch failed:', e.message); }
+    const MF = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    function nc(month, year) {
+      const idx = MONTHS.indexOf(month);
+      return idx !== -1 ? (notionConvData[MF[idx] + ' ' + year] || { clinic: 0, pts: {} }) : { clinic: 0, pts: {} };
+    }
+
     // Build monthly data per PT and clinic
     const data = { clinic: {}, pts: {}, meta: { generatedAt: new Date().toISOString() } };
 
@@ -1494,7 +1503,7 @@ app.get('/dashboard-data', async (req, res) => {
       for (const year of YEARS) {
         const leads     = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalLeads, month, year);
         const evals     = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalEvals, month, year);
-        const convs     = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalConversions, month, year);
+        const convs     = nc(month, year).clinic || 0;
         const visits    = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalVisits, month, year);
         const over24    = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalCancels24hr, month, year);
         const late      = monthlyVal(clinicRows, TABLE_ANCHORS.clinic.totalLateCancels, month, year);
@@ -1515,7 +1524,7 @@ app.get('/dashboard-data', async (req, res) => {
         for (const year of YEARS) {
           const anchors = TABLE_ANCHORS.pt;
           const evals  = monthlyVal(rows, anchors.totalEvals, month, year);
-          const convs  = monthlyVal(rows, anchors.totalConversions, month, year);
+          const convs  = nc(month, year).pts[pt] || 0;
           const visits = monthlyVal(rows, anchors.totalVisits, month, year);
           const over24 = monthlyVal(rows, anchors.totalCancels24hr, month, year);
           const late   = monthlyVal(rows, anchors.totalLateCancels, month, year);
@@ -1596,13 +1605,31 @@ app.get('/dashboard', async (req, res) => {
     const curMonth = MONTHS[curMonthIdx];
     const clinicRows = tabData[CLINIC_TAB];
 
+    // Fetch Notion conversion data (Package Purchased only)
+    let notionConversions = {};
+    try {
+      notionConversions = await getNotionConversions();
+    } catch(e) {
+      console.error('Notion fetch failed in dashboard:', e.message);
+    }
+
+    const MONTH_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+    function notionConvForMonth(month, year) {
+      // month is short name e.g. 'Apr', year is number e.g. 2026
+      const idx = MONTHS.indexOf(month);
+      if (idx === -1) return { clinic: 0, pts: {} };
+      const key = MONTH_FULL[idx] + ' ' + year;
+      return notionConversions[key] || { clinic: 0, pts: {} };
+    }
+
     // Pull current month data per PT
     function getPTMonth(pt, month, year) {
       const rows = tabData[PT_TABS[pt]];
       const a = TABLE_ANCHORS.pt;
+      const nc = notionConvForMonth(month, year);
       return {
         evals:  monthlyVal(rows, a.totalEvals, month, year) || 0,
-        convs:  monthlyVal(rows, a.totalConversions, month, year) || 0,
+        convs:  nc.pts[pt] || 0,
         visits: monthlyVal(rows, a.totalVisits, month, year) || 0,
         over24: monthlyVal(rows, a.totalCancels24hr, month, year) || 0,
         late:   monthlyVal(rows, a.totalLateCancels, month, year) || 0,
@@ -1613,10 +1640,11 @@ app.get('/dashboard', async (req, res) => {
 
     function getClinicMonth(month, year) {
       const a = TABLE_ANCHORS.clinic;
+      const nc = notionConvForMonth(month, year);
       return {
         leads:  monthlyVal(clinicRows, a.totalLeads, month, year) || 0,
         evals:  monthlyVal(clinicRows, a.totalEvals, month, year) || 0,
-        convs:  monthlyVal(clinicRows, a.totalConversions, month, year) || 0,
+        convs:  nc.clinic || 0,
         visits: monthlyVal(clinicRows, a.totalVisits, month, year) || 0,
         over24: monthlyVal(clinicRows, a.totalCancels24hr, month, year) || 0,
         late:   monthlyVal(clinicRows, a.totalLateCancels, month, year) || 0,
@@ -4419,12 +4447,47 @@ async function extractLeadsFromPdf(buffer) {
 }
 
 // Read post-eval sheet and count conversions by PT for a given month/year
-async function getEvalConversions(month, year) {
+const NOTION_CONVERSIONS_DB = '27fe3256aaa180aabf9de53d42298016';
+const MONTH_FULL_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const PT_NAMES_ALL = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
+
+// Pull Package Purchased conversions from Notion (historical source)
+// Returns { 'April 2026': { clinic: N, pts: { 'Chris Bostwick': N, ... } } }
+async function getNotionConversions() {
+  const token = process.env.NOTION_TOKEN;
+  if (!token) throw new Error('NOTION_TOKEN not set');
+
+  const results = [];
+  let cursor = undefined;
+  do {
+    const body = { filter: { property: 'Deal Outcome', select: { equals: 'Package Purchased' } }, page_size: 100 };
+    if (cursor) body.start_cursor = cursor;
+    const resp = await axios.post(
+      `https://api.notion.com/v1/databases/${NOTION_CONVERSIONS_DB}/query`, body,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' } }
+    );
+    results.push(...resp.data.results);
+    cursor = resp.data.has_more ? resp.data.next_cursor : undefined;
+  } while (cursor);
+
+  const byMonth = {};
+  for (const page of results) {
+    const props = page.properties;
+    const monthKey = props['Month Key']?.select?.name || props['Month Key']?.rich_text?.[0]?.plain_text || '';
+    const pt = props['Evaluating Physical Therapist']?.select?.name || props['Evaluating Physical Therapist']?.rich_text?.[0]?.plain_text || '';
+    if (!monthKey) continue;
+    if (!byMonth[monthKey]) { byMonth[monthKey] = { clinic: 0, pts: {} }; for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0; }
+    byMonth[monthKey].clinic++;
+    if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
+  }
+  return byMonth;
+}
+
+// Pull Package Purchased conversions from Railway post-eval Google Sheet (ongoing source)
+// Returns same shape: { 'April 2026': { clinic: N, pts: { ... } } }
+async function getSheetConversions() {
   const sheets = getGoogleSheetsClient();
-  const result = await sheets.spreadsheets.values.get({
-    spreadsheetId: POST_EVAL_SHEET_ID,
-    range: 'Sheet1!A:Z'
-  });
+  const result = await sheets.spreadsheets.values.get({ spreadsheetId: POST_EVAL_SHEET_ID, range: 'Sheet1!A:Z' });
   const rows = result.data.values || [];
   if (rows.length < 2) return {};
 
@@ -4433,26 +4496,53 @@ async function getEvalConversions(month, year) {
   const ptIdx = headers.findIndex(h => h.includes('evaluating pt') || h === 'evaluating_pt');
   const tsIdx = headers.findIndex(h => h.includes('timestamp'));
 
-  const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
-  const counts = {};
-  for (const pt of PT_NAMES) counts[pt] = 0;
-
-  const monthIdx = MONTH_NAMES.indexOf(month);
-
+  const byMonth = {};
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    const outcome = row[outcomeIdx]?.trim().toLowerCase();
-    const pt = row[ptIdx]?.trim();
-    const ts = row[tsIdx]?.trim();
-    if (!outcome || !pt || !ts) continue;
-    if (!outcome.includes('convert')) continue;
-
-    // Parse timestamp to check month/year
+    const outcome = row[outcomeIdx]?.trim().toLowerCase() || '';
+    const pt = row[ptIdx]?.trim() || '';
+    const ts = row[tsIdx]?.trim() || '';
+    if (!outcome.includes('convert') || !ts) continue;
     const d = new Date(ts);
     if (isNaN(d.getTime())) continue;
-    if (d.getFullYear() !== year || d.getMonth() !== monthIdx) continue;
-    if (counts.hasOwnProperty(pt)) counts[pt]++;
+    const monthKey = `${MONTH_FULL_NAMES[d.getMonth()]} ${d.getFullYear()}`;
+    if (!byMonth[monthKey]) { byMonth[monthKey] = { clinic: 0, pts: {} }; for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0; }
+    byMonth[monthKey].clinic++;
+    if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
   }
+  return byMonth;
+}
+
+// Merge Notion (historical) + Google Sheet (ongoing) conversions — both sources summed
+async function getAllConversions() {
+  const [notionData, sheetData] = await Promise.allSettled([getNotionConversions(), getSheetConversions()]);
+  const notion = notionData.status === 'fulfilled' ? notionData.value : {};
+  const sheet  = sheetData.status  === 'fulfilled' ? sheetData.value  : {};
+
+  const merged = {};
+  const allKeys = new Set([...Object.keys(notion), ...Object.keys(sheet)]);
+  for (const key of allKeys) {
+    merged[key] = { clinic: 0, pts: {} };
+    for (const p of PT_NAMES_ALL) merged[key].pts[p] = 0;
+    if (notion[key]) { merged[key].clinic += notion[key].clinic; for (const p of PT_NAMES_ALL) merged[key].pts[p] += notion[key].pts[p] || 0; }
+    if (sheet[key])  { merged[key].clinic += sheet[key].clinic;  for (const p of PT_NAMES_ALL) merged[key].pts[p] += sheet[key].pts[p]  || 0; }
+  }
+  return merged;
+}
+
+// Get conversions for a specific month/year — used during metrics submit
+async function getEvalConversions(month, year) {
+  const monthIdx = MONTH_NAMES.indexOf(month);
+  if (monthIdx === -1) return {};
+  const monthKey = `${MONTH_FULL_NAMES[monthIdx]} ${year}`;
+  const counts = {};
+  for (const pt of PT_NAMES_ALL) counts[pt] = 0;
+  try {
+    const all = await getAllConversions();
+    const md = all[monthKey];
+    if (!md) return counts;
+    for (const pt of PT_NAMES_ALL) counts[pt] = md.pts[pt] || 0;
+  } catch(e) { console.error('getEvalConversions failed:', e.message); }
   return counts;
 }
 
