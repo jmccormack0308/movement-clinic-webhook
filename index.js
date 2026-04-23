@@ -1417,6 +1417,28 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// GET /notion-debug?pin=2365 — inspect raw Notion API response for first page
+app.get('/notion-debug', async (req, res) => {
+  if (req.query.pin !== '2365') return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const token = process.env.NOTION_TOKEN;
+    const resp = await axios.post(
+      `https://api.notion.com/v1/databases/${NOTION_CONVERSIONS_DB}/query`,
+      { page_size: 1 },
+      { headers: { 'Authorization': `Bearer ${token}`, 'Notion-Version': '2022-06-28', 'Content-Type': 'application/json' } }
+    );
+    const page = resp.data.results[0];
+    if (!page) return res.json({ error: 'No pages found' });
+    const propSummary = {};
+    for (const [key, val] of Object.entries(page.properties)) {
+      propSummary[key] = { type: val.type, raw: val[val.type] };
+    }
+    res.json({ totalResults: resp.data.results.length, hasMore: resp.data.has_more, properties: propSummary });
+  } catch(e) {
+    res.status(500).json({ error: e.message, detail: e.response?.data });
+  }
+});
+
 // POST /dashboard/auth — validate PIN and set session cookie
 app.post('/dashboard/auth', express.urlencoded({ extended: false }), (req, res) => {
   const { pin } = req.body;
