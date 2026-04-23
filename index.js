@@ -4490,11 +4490,8 @@ async function getNotionConversions() {
   const results = [];
   let cursor = undefined;
   do {
-    // Deal Outcome is a formula field — filter on Evaluation Conversion Count = 1 instead
-    const body = {
-      filter: { property: 'Evaluation Conversion Count', formula: { number: { equals: 1 } } },
-      page_size: 100
-    };
+    // Notion cannot filter on formula fields — fetch all records and filter client-side
+    const body = { page_size: 100 };
     if (cursor) body.start_cursor = cursor;
     const resp = await axios.post(
       `https://api.notion.com/v1/databases/${NOTION_CONVERSIONS_DB}/query`, body,
@@ -4511,6 +4508,10 @@ async function getNotionConversions() {
     // Month Key is a formula string field
     const monthKey = props['Month Key']?.formula?.string || '';
     if (!monthKey) continue;
+
+    // Filter client-side: only count Package Purchased (Deal Outcome is a formula)
+    const dealOutcome = props['Deal Outcome']?.formula?.string || '';
+    if (dealOutcome !== 'Package Purchased') continue;
 
     // Evaluating Physical Therapist is multi_select — may be empty
     // Fall back to Employee Email formula field to derive PT name
