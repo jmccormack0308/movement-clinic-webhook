@@ -4426,34 +4426,31 @@ async function parseGeneralVisitReport(buffer) {
   const ws = wb.worksheets[0];
   const rows = [];
   ws.eachRow((row) => {
-    rows.push(row.values.slice(1)); // exceljs row.values is 1-indexed; slice(1) makes it 0-indexed
+    // row.values is 1-based in ExcelJS ([undefined, col1, col2, ...])
+    // Keep as-is (don't slice) and access with 1-based indices to match sheet columns
+    rows.push(row.values);
   });
 
   const today = new Date();
   today.setHours(23, 59, 59, 999);
 
-  // Detail rows: col[1]=Patient, col[2]=Date of Service, col[3]=Status, col[4]=Provider, col[5]=Service
+  // Sheet columns (1-based): col[1]=blank, col[2]=Patient, col[3]=Date of Service, col[4]=Status, col[5]=Provider, col[6]=Service
   for (const row of rows) {
-    const provider = row[4];
-    const service  = row[5];
-    const dosRaw   = row[2]; // ExcelJS returns dates as Date objects, numbers, or strings
-    // Normalize to JS Date regardless of how ExcelJS returns it
+    const provider = row[5];
+    const service  = row[6];
+    const dosRaw   = row[3];
+
+    if (!provider || !PT_NAMES.includes(provider)) continue;
+    if (!service) continue;
+
     let dos = null;
     if (dosRaw instanceof Date) {
       dos = dosRaw;
     } else if (typeof dosRaw === 'number') {
-      // Excel serial date number → JS Date
       dos = new Date(Math.round((dosRaw - 25569) * 86400 * 1000));
     } else if (typeof dosRaw === 'string' && dosRaw.trim()) {
       dos = new Date(dosRaw);
     }
-    // Temporary debug — log first 5 rows to Railway logs so we can see what ExcelJS returns
-    if (rows.indexOf(row) < 5) {
-      console.log('[DOS DEBUG] raw:', dosRaw, 'type:', typeof dosRaw, 'parsed:', dos, 'provider:', row[4], 'service:', row[5]);
-    }
-
-    if (!provider || !PT_NAMES.includes(provider)) continue;
-    if (!service) continue;
 
     const svc = service.toLowerCase();
     const isEval = svc.includes('evaluation') || service.includes('$50 Comprehensive');
