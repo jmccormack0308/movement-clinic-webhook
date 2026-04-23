@@ -1855,7 +1855,7 @@ tbody td:first-child{font-weight:700}
     <div class="section-title">${curMonth} ${curYear} — Provider Snapshot</div>
 
     <!-- Clinic Summary Bar -->
-    <div style="background:#232323;border-radius:8px;padding:14px 20px;margin-bottom:20px;display:flex;gap:0;flex-wrap:wrap">
+    <div style="background:#232323;border-radius:8px;padding:18px 20px;margin-bottom:20px;display:flex;gap:0;flex-wrap:wrap;align-items:center">
       ${[
         ['Total Leads', n(clinicCur.leads)],
         ['Total Visits', n(clinicCur.visits)],
@@ -1866,9 +1866,9 @@ tbody td:first-child{font-weight:700}
         ['Cancel Rate', cancelBadge(exJRate)],
         ['Open Charts', n(clinicCur.charts)],
         ['Overdue Tasks', n(clinicCur.tasks)],
-      ].map(([k,v]) => `<div style="flex:1;min-width:100px;padding:6px 16px;border-right:1px solid #333;last-child{border:none}">
-        <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin-bottom:4px">${k}</div>
-        <div style="font-size:16px;font-weight:700;color:#FFD70A">${v}</div>
+      ].map(([k,v]) => `<div style="flex:1;min-width:100px;padding:8px 16px;border-right:1px solid #333;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center">
+        <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin-bottom:6px;text-align:center">${k}</div>
+        <div style="font-size:16px;font-weight:700;color:#FFD70A;text-align:center;display:flex;justify-content:center">${v}</div>
       </div>`).join('')}
     </div>
 
@@ -1902,21 +1902,21 @@ tbody td:first-child{font-weight:700}
     <div class="section-title">Visit Breakdown by Provider</div>
     <table>
       <thead><tr>
-        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Complimentary</th><th>Evals</th><th>Held</th><th>Convs</th><th>Conv %</th><th>Sched Eff</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
+        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Cont %</th><th>Complimentary</th><th>Evals</th><th>Held</th><th>Convs</th><th>Conv %</th><th>Sched Eff</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
       </tr></thead>
       <tbody>
         ${PT_LIST.map(pt => {
           const d = ptData[pt];
+          const contPct = d.visits && d.continuity != null ? (d.continuity / d.visits * 100).toFixed(1) + '%' : '—';
           return `<tr>
             <td style="color:${PT_COLORS[pt]}">${pt}</td>
             <td>${n(d.visits)}</td>
             <td>${opt(d.continuity)}</td>
+            <td>${contPct}</td>
             <td>${opt(d.complimentary)}</td>
             <td>${n(d.evals)}</td>
             <td>${n(d.evalsHeld)}</td>
             <td>${n(d.convs)}</td>
-            <td>${n(d.pendingVisit)}</td>
-            <td>${n(d.pendingCall)}</td>
             <td>${convBadge(convRate(d))}</td>
             <td>${effBadge(d.schedEff)}</td>
             <td>${cancelBadge(cancelRate(d))}</td>
@@ -1927,9 +1927,8 @@ tbody td:first-child{font-weight:700}
         <tr style="background:#232323;color:#fff;font-weight:700">
           <td style="color:#FFD70A">Clinic Total</td>
           <td>${n(clinicCur.visits)}</td>
-          <td>—</td><td>—</td>
+          <td>—</td><td>—</td><td>—</td>
           <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.evalsHeld)}</td><td>${n(clinicCur.convs)}</td>
-          <td>${n(clinicCur.pendingVisit)}</td><td>${n(clinicCur.pendingCall)}</td>
           <td>${convBadge(convRate(clinicCur))}</td>
           <td>—</td>
           <td>${cancelBadge(exJRate)}</td>
