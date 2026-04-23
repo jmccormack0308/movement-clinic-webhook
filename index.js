@@ -4415,43 +4415,29 @@ function weeklyCell(anchor, monthName, week) {
 }
 
 // Parse GeneralVisitReport CSV → per-PT counts
-async function parseGeneralVisitReport(buffer) {
-  const ExcelJS = require('exceljs');
+function parseGeneralVisitReport(buffer) {
   const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
   const data = {};
   for (const pt of PT_NAMES) data[pt] = { evals: 0, evalsHeld: 0, visits: 0, continuity: 0, complimentary: 0 };
 
-  const wb = new ExcelJS.Workbook();
-  await wb.xlsx.load(buffer);
-  const ws = wb.worksheets[0];
-  const rows = [];
-  ws.eachRow((row) => {
-    // row.values is 1-based in ExcelJS ([undefined, col1, col2, ...])
-    // Keep as-is (don't slice) and access with 1-based indices to match sheet columns
-    rows.push(row.values);
-  });
-
   const today = new Date();
   today.setHours(23, 59, 59, 999);
 
-  // Sheet columns (1-based): col[1]=blank, col[2]=Patient, col[3]=Date of Service, col[4]=Status, col[5]=Provider, col[6]=Service
-  for (const row of rows) {
-    const provider = row[5];
-    const service  = row[6];
-    const dosRaw   = row[3];
+  const text = buffer.toString('utf8');
+  const lines = text.split('\n').filter(l => l.trim());
+
+  // CSV columns: Group By, Patient Name, Date of Service, Appointment Status, Provider, Service, Charges, Payments
+  for (const line of lines) {
+    if (line.startsWith('Group By') || !line.trim()) continue;
+    const cols = line.split(',');
+    const provider = cols[4]?.trim().replace(/^"|"$/g, '');
+    const service  = cols[5]?.trim().replace(/^"|"$/g, '');
+    const dosStr   = cols[2]?.trim().replace(/^"|"$/g, ''); // MM/DD/YYYY
 
     if (!provider || !PT_NAMES.includes(provider)) continue;
     if (!service) continue;
 
-    let dos = null;
-    if (dosRaw instanceof Date) {
-      dos = dosRaw;
-    } else if (typeof dosRaw === 'number') {
-      dos = new Date(Math.round((dosRaw - 25569) * 86400 * 1000));
-    } else if (typeof dosRaw === 'string' && dosRaw.trim()) {
-      dos = new Date(dosRaw);
-    }
-
+    const dos = dosStr ? new Date(dosStr) : null;
     const svc = service.toLowerCase();
     const isEval = svc.includes('evaluation') || service.includes('$50 Comprehensive');
 
@@ -5462,7 +5448,7 @@ app.post('/metrics/submit', metricsUpload.fields([
 
     // ── 1. General Visit Report ──────────────────────────────
     if (files.generalVisits?.[0]) {
-      const visitData = await parseGeneralVisitReport(files.generalVisits[0].buffer);
+      const visitData = parseGeneralVisitReport(files.generalVisits[0].buffer);
       let clinicEvals = 0, clinicVisits = 0;
 
       for (const [pt, counts] of Object.entries(visitData)) {
@@ -5595,7 +5581,7 @@ app.post('/metrics/submit', metricsUpload.fields([
       const latestMetrics = {
         month, year, week,
         updatedAt: new Date().toISOString(),
-        visitData: files.generalVisits?.[0] ? await parseGeneralVisitReport(files.generalVisits[0].buffer) : null,
+        visitData: files.generalVisits?.[0] ? parseGeneralVisitReport(files.generalVisits[0].buffer) : null,
         schedEfficiency: files.appointmentMetrics?.[0] ? parseAppointmentMetrics(files.appointmentMetrics[0].buffer) : null,
       };
       const metricsPath = require('path').join(require('fs').existsSync('/data') ? '/data' : '/tmp', 'latest-metrics.json');
