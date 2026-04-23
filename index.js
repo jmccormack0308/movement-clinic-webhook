@@ -1806,10 +1806,10 @@ body{font-family:'Montserrat','Segoe UI',Arial,sans-serif;background:#F7F8FA;col
 .card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px}
 .card-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#6b7280;margin-bottom:6px}
 .card-name{font-size:13px;font-weight:700;color:#232323;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid}
-.card-row{display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #f3f4f6}
+.card-row{display:flex;flex-direction:row-reverse;justify-content:flex-end;gap:8px;padding:3px 0;border-bottom:1px solid #e5e7eb}
 .card-row:last-child{border-bottom:none}
-.card-key{color:#6b7280;font-weight:500}
-.card-val{font-weight:700;color:#232323}
+.card-key{color:#6b7280;font-weight:500;flex:1}
+.card-val{font-weight:700;color:#232323;min-width:36px;text-align:left}
 .clinic-card{background:#232323;border-color:#232323;color:#fff}
 .clinic-card .card-label{color:#9CA3AF}
 .clinic-card .card-name{color:#FFD70A;border-bottom-color:#FFD70A}
@@ -1886,24 +1886,24 @@ tbody td:first-child{font-weight:700}
         return `<div class="card">
           <div class="card-label">${isJordan ? 'Owner / PT' : 'Physical Therapist'}</div>
           <div class="card-name" style="border-color:${PT_COLORS[pt]}">${pt}</div>
-          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Volume</div>
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#232323;margin:10px 0 4px;border-bottom:1px solid #232323;padding-bottom:3px;">Volume</div>
           <div class="card-row"><span class="card-key">Visits</span><span class="card-val">${n(d.visits)}</span></div>
           <div class="card-row"><span class="card-key">Continuity Visits</span><span class="card-val">${opt(d.continuity)}</span></div>
           <div class="card-row"><span class="card-key">Continuity %</span><span class="card-val">${d.visits && d.continuity != null ? (d.continuity/d.visits*100).toFixed(1)+'%' : '—'}</span></div>
           <div class="card-row"><span class="card-key">Complimentary</span><span class="card-val">${opt(d.complimentary)}</span></div>
-          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Evals &amp; Conversions</div>
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#232323;margin:10px 0 4px;border-bottom:1px solid #232323;padding-bottom:3px;">Evals &amp; Conversions</div>
           <div class="card-row"><span class="card-key">Evals (Total)</span><span class="card-val">${n(d.evals)}</span></div>
           <div class="card-row"><span class="card-key">Evals Held</span><span class="card-val">${n(d.evalsHeld)}</span></div>
           <div class="card-row"><span class="card-key">Form Submissions</span><span class="card-val">${n(d.submissions)}</span></div>
           <div class="card-row"><span class="card-key">Conversions</span><span class="card-val">${n(d.convs)}</span></div>
           <div class="card-row"><span class="card-key">Conversion Rate</span><span class="card-val">${convBadge(cRate)}</span></div>
           <div class="card-row"><span class="card-key">Pending</span><span class="card-val">${n(d.pending)}</span></div>
-          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Efficiency</div>
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#232323;margin:10px 0 4px;border-bottom:1px solid #232323;padding-bottom:3px;">Efficiency</div>
           <div class="card-row"><span class="card-key">Schedule Efficiency</span><span class="card-val">${effBadge(d.schedEff)}</span></div>
           <div class="card-row"><span class="card-key">Cancel Rate</span><span class="card-val">${cancelBadge(rate)}</span></div>
           <div class="card-row"><span class="card-key">&gt;24hr Cancels</span><span class="card-val">${n(d.over24)}</span></div>
           <div class="card-row"><span class="card-key">Late / No-Show</span><span class="card-val">${n(d.late)}</span></div>
-          ${!isJordan ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Admin</div>
+          ${!isJordan ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#232323;margin:10px 0 4px;border-bottom:1px solid #232323;padding-bottom:3px;">Admin</div>
           <div class="card-row"><span class="card-key">Open Charts</span><span class="card-val">${n(d.charts)}</span></div>
           <div class="card-row"><span class="card-key">Overdue Tasks</span><span class="card-val">${n(d.tasks)}</span></div>` : ''}
         </div>`;
@@ -1911,9 +1911,9 @@ tbody td:first-child{font-weight:700}
     </div>
 
     <div class="section-title">Visit Breakdown by Provider</div>
-    <table>
+    <table style="text-align:center">
       <thead><tr>
-        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Cont %</th><th>Complimentary</th><th>Evals</th><th>Evals Held</th><th>Submissions</th><th>Conversions</th><th>Conv Rate</th><th>Pending</th><th>Sched Efficiency</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
+        <th style="text-align:center">Provider</th><th style="text-align:center">Visits</th><th style="text-align:center">Continuity</th><th style="text-align:center">Cont %</th><th style="text-align:center">Complimentary</th><th style="text-align:center">Evals</th><th style="text-align:center">Evals Held</th><th style="text-align:center">Submissions</th><th style="text-align:center">Conversions</th><th style="text-align:center">Conv Rate</th><th style="text-align:center">Pending</th><th style="text-align:center">Sched Efficiency</th><th style="text-align:center">Cancel Rate</th><th style="text-align:center">Open Charts</th><th style="text-align:center">Overdue Tasks</th>
       </tr></thead>
       <tbody>
         ${PT_LIST.map(pt => {
