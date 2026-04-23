@@ -4436,7 +4436,17 @@ async function parseGeneralVisitReport(buffer) {
   for (const row of rows) {
     const provider = row[4];
     const service  = row[5];
-    const dos      = row[2]; // Date object when cellDates:true
+    const dosRaw   = row[2]; // ExcelJS returns dates as Date objects, numbers, or strings
+    // Normalize to JS Date regardless of how ExcelJS returns it
+    let dos = null;
+    if (dosRaw instanceof Date) {
+      dos = dosRaw;
+    } else if (typeof dosRaw === 'number') {
+      // Excel serial date number → JS Date
+      dos = new Date(Math.round((dosRaw - 25569) * 86400 * 1000));
+    } else if (typeof dosRaw === 'string' && dosRaw.trim()) {
+      dos = new Date(dosRaw);
+    }
 
     if (!provider || !PT_NAMES.includes(provider)) continue;
     if (!service) continue;
@@ -4447,7 +4457,7 @@ async function parseGeneralVisitReport(buffer) {
     data[provider].visits++;
     if (isEval) {
       data[provider].evals++;
-      if (dos instanceof Date && dos <= today) data[provider].evalsHeld++;
+      if (dos && dos <= today) data[provider].evalsHeld++;
     }
     if (svc.includes('continuity')) data[provider].continuity++;
     if (svc.includes('complimentary')) data[provider].complimentary++;
