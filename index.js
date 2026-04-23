@@ -1800,7 +1800,7 @@ body{font-family:'Montserrat','Segoe UI',Arial,sans-serif;background:#F7F8FA;col
 .tab.active{color:#0065A3;border-bottom-color:#0065A3}
 .tab:hover{color:#232323}
 .page{display:none}.page.active{display:block}
-.container{max-width:1100px;margin:0 auto;padding:0 40px 60px}
+.container{max-width:1400px;margin:0 auto;padding:0 16px 60px}
 .section-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1.2px;color:#0065A3;border-bottom:2px solid #0065A3;padding-bottom:5px;margin-bottom:14px;margin-top:28px}
 .cards{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
 .card{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px}
@@ -1886,18 +1886,25 @@ tbody td:first-child{font-weight:700}
         return `<div class="card">
           <div class="card-label">${isJordan ? 'Owner / PT' : 'Physical Therapist'}</div>
           <div class="card-name" style="border-color:${PT_COLORS[pt]}">${pt}</div>
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Volume</div>
           <div class="card-row"><span class="card-key">Visits</span><span class="card-val">${n(d.visits)}</span></div>
           <div class="card-row"><span class="card-key">Continuity Visits</span><span class="card-val">${opt(d.continuity)}</span></div>
+          <div class="card-row"><span class="card-key">Continuity %</span><span class="card-val">${d.visits && d.continuity != null ? (d.continuity/d.visits*100).toFixed(1)+'%' : '—'}</span></div>
           <div class="card-row"><span class="card-key">Complimentary</span><span class="card-val">${opt(d.complimentary)}</span></div>
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Evals &amp; Conversions</div>
           <div class="card-row"><span class="card-key">Evals (Total)</span><span class="card-val">${n(d.evals)}</span></div>
           <div class="card-row"><span class="card-key">Evals Held</span><span class="card-val">${n(d.evalsHeld)}</span></div>
+          <div class="card-row"><span class="card-key">Form Submissions</span><span class="card-val">${n(d.submissions)}</span></div>
           <div class="card-row"><span class="card-key">Conversions</span><span class="card-val">${n(d.convs)}</span></div>
-          <div class="card-row"><span class="card-key">Conv Rate</span><span class="card-val">${convBadge(cRate)}</span></div>
-          <div class="card-row"><span class="card-key">Sched Efficiency</span><span class="card-val">${effBadge(d.schedEff)}</span></div>
+          <div class="card-row"><span class="card-key">Conversion Rate</span><span class="card-val">${convBadge(cRate)}</span></div>
+          <div class="card-row"><span class="card-key">Pending</span><span class="card-val">${n(d.pending)}</span></div>
+          <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Efficiency</div>
+          <div class="card-row"><span class="card-key">Schedule Efficiency</span><span class="card-val">${effBadge(d.schedEff)}</span></div>
           <div class="card-row"><span class="card-key">Cancel Rate</span><span class="card-val">${cancelBadge(rate)}</span></div>
           <div class="card-row"><span class="card-key">&gt;24hr Cancels</span><span class="card-val">${n(d.over24)}</span></div>
-          <div class="card-row"><span class="card-key">Late/No-Show</span><span class="card-val">${n(d.late)}</span></div>
-          ${!isJordan ? `<div class="card-row"><span class="card-key">Open Charts</span><span class="card-val">${n(d.charts)}</span></div>
+          <div class="card-row"><span class="card-key">Late / No-Show</span><span class="card-val">${n(d.late)}</span></div>
+          ${!isJordan ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin:10px 0 4px;">Admin</div>
+          <div class="card-row"><span class="card-key">Open Charts</span><span class="card-val">${n(d.charts)}</span></div>
           <div class="card-row"><span class="card-key">Overdue Tasks</span><span class="card-val">${n(d.tasks)}</span></div>` : ''}
         </div>`;
       }).join('')}
@@ -1905,24 +1912,9 @@ tbody td:first-child{font-weight:700}
 
     <div class="section-title">Visit Breakdown by Provider</div>
     <table>
-      <thead>
-        <tr style="background:#1a1a2e;color:#FFD70A;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">
-          <td></td>
-          <td colspan="3" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Volume</td>
-          <td colspan="1" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Compl.</td>
-          <td colspan="4" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Evals &amp; Conversions</td>
-          <td colspan="2" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Efficiency</td>
-          <td colspan="2" style="text-align:center;padding:4px 8px;">Admin</td>
-        </tr>
-        <tr>
-          <th>Provider</th>
-          <th>Visits</th><th>Continuity</th><th>Cont %</th>
-          <th style="border-right:2px solid #FFD70A;">Compl.</th>
-          <th>Evals</th><th>Held</th><th>Submissions</th><th>Convs</th><th>Conv %</th><th style="border-right:2px solid #FFD70A;">Pending</th>
-          <th>Sched Eff</th><th style="border-right:2px solid #FFD70A;">Cancel Rate</th>
-          <th>Open Charts</th><th>Overdue Tasks</th>
-        </tr>
-      </thead>
+      <thead><tr>
+        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Cont %</th><th>Complimentary</th><th>Evals</th><th>Evals Held</th><th>Submissions</th><th>Conversions</th><th>Conv Rate</th><th>Pending</th><th>Sched Efficiency</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
+      </tr></thead>
       <tbody>
         ${PT_LIST.map(pt => {
           const d = ptData[pt];
@@ -1932,15 +1924,15 @@ tbody td:first-child{font-weight:700}
             <td>${n(d.visits)}</td>
             <td>${opt(d.continuity)}</td>
             <td>${contPct}</td>
-            <td style="border-right:2px solid #e5e7eb;">${opt(d.complimentary)}</td>
+            <td>${opt(d.complimentary)}</td>
             <td>${n(d.evals)}</td>
             <td>${n(d.evalsHeld)}</td>
             <td>${n(d.submissions)}</td>
             <td>${n(d.convs)}</td>
             <td>${convBadge(convRate(d))}</td>
-            <td style="border-right:2px solid #e5e7eb;">${n(d.pending)}</td>
+            <td>${n(d.pending)}</td>
             <td>${effBadge(d.schedEff)}</td>
-            <td style="border-right:2px solid #e5e7eb;">${cancelBadge(cancelRate(d))}</td>
+            <td>${cancelBadge(cancelRate(d))}</td>
             <td>${pt !== 'Jordan McCormack' ? n(d.charts) : '—'}</td>
             <td>${pt !== 'Jordan McCormack' ? n(d.tasks) : '—'}</td>
           </tr>`;
@@ -1949,14 +1941,14 @@ tbody td:first-child{font-weight:700}
           <td style="color:#FFD70A">Clinic Total</td>
           <td>${n(clinicCur.visits)}</td>
           <td>—</td><td>—</td>
-          <td style="border-right:2px solid #FFD70A;">—</td>
+          <td>—</td>
           <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.evalsHeld)}</td>
           <td>${n(clinicCur.submissions)}</td>
           <td>${n(clinicCur.convs)}</td>
           <td>${convBadge(convRate(clinicCur))}</td>
-          <td style="border-right:2px solid #FFD70A;">${n(clinicCur.pending)}</td>
+          <td>${n(clinicCur.pending)}</td>
           <td>—</td>
-          <td style="border-right:2px solid #FFD70A;">${cancelBadge(exJRate)}</td>
+          <td>${cancelBadge(exJRate)}</td>
           <td>${n(clinicCur.charts)}</td><td>${n(clinicCur.tasks)}</td>
         </tr>
       </tbody>
