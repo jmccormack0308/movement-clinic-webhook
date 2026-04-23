@@ -4479,10 +4479,22 @@ async function getNotionConversions() {
   const token = process.env.NOTION_TOKEN;
   if (!token) throw new Error('NOTION_TOKEN not set');
 
+  // Email → PT name map for fallback when Evaluating Physical Therapist is blank
+  const EMAIL_TO_PT = {
+    'chris@movementclinicpt.com': 'Chris Bostwick',
+    'tj@movementclinicpt.com':    'TJ Aquino',
+    'john@movementclinicpt.com':  'John Gan',
+    'jordan@movementclinicpt.com':'Jordan McCormack'
+  };
+
   const results = [];
   let cursor = undefined;
   do {
-    const body = { filter: { property: 'Deal Outcome', select: { equals: 'Package Purchased' } }, page_size: 100 };
+    // Deal Outcome is a formula field — filter on Evaluation Conversion Count = 1 instead
+    const body = {
+      filter: { property: 'Evaluation Conversion Count', formula: { number: { equals: 1 } } },
+      page_size: 100
+    };
     if (cursor) body.start_cursor = cursor;
     const resp = await axios.post(
       `https://api.notion.com/v1/databases/${NOTION_CONVERSIONS_DB}/query`, body,
@@ -4495,9 +4507,17 @@ async function getNotionConversions() {
   const byMonth = {};
   for (const page of results) {
     const props = page.properties;
-    const monthKey = props['Month Key']?.select?.name || props['Month Key']?.rich_text?.[0]?.plain_text || '';
-    const pt = props['Evaluating Physical Therapist']?.select?.name || props['Evaluating Physical Therapist']?.rich_text?.[0]?.plain_text || '';
+
+    // Month Key is a formula string field
+    const monthKey = props['Month Key']?.formula?.string || '';
     if (!monthKey) continue;
+
+    // Evaluating Physical Therapist is multi_select — may be empty
+    // Fall back to Employee Email formula field to derive PT name
+    const ptFromSelect = props['Evaluating Physical Therapist']?.multi_select?.[0]?.name || '';
+    const empEmail = props['Employee Email']?.formula?.string || '';
+    const pt = ptFromSelect || EMAIL_TO_PT[empEmail] || '';
+
     if (!byMonth[monthKey]) { byMonth[monthKey] = { clinic: 0, pts: {} }; for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0; }
     byMonth[monthKey].clinic++;
     if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
