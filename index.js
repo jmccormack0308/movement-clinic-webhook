@@ -1663,6 +1663,7 @@ app.get('/dashboard', async (req, res) => {
       const schedEff = isCurrentSnap && latestMetrics.schedEfficiency ? latestMetrics.schedEfficiency[pt] : null;
       return {
         evals:         monthlyVal(rows, a.totalEvals, month, year) || 0,
+        evalsHeld:     snapPT ? (snapPT.evalsHeld || 0) : 0,
         convs:         nc.pts[pt] || 0,
         visits:        monthlyVal(rows, a.totalVisits, month, year) || 0,
         over24:        monthlyVal(rows, a.totalCancels24hr, month, year) || 0,
@@ -1684,6 +1685,9 @@ app.get('/dashboard', async (req, res) => {
       return {
         leads:        monthlyVal(clinicRows, a.totalLeads, month, year) || 0,
         evals:        monthlyVal(clinicRows, a.totalEvals, month, year) || 0,
+        evalsHeld:    isCurrentSnap && latestMetrics.visitData
+                        ? Object.values(latestMetrics.visitData).reduce((s, d) => s + (d.evalsHeld || 0), 0)
+                        : 0,
         convs:        nc.clinic || 0,
         visits:       monthlyVal(clinicRows, a.totalVisits, month, year) || 0,
         over24:       monthlyVal(clinicRows, a.totalCancels24hr, month, year) || 0,
@@ -1708,8 +1712,9 @@ app.get('/dashboard', async (req, res) => {
       return `<span class="badge green">${pct}</span>`;
     }
     function convRate(d) {
-      if (!d.evals) return null;
-      return (d.convs / d.evals * 100);
+      // Conversion rate = conversions / evals held (not total evals incl. future)
+      if (!d.evalsHeld) return null;
+      return (d.convs / d.evalsHeld * 100);
     }
     function convBadge(rate) {
       if (rate === null) return '<span style="color:#6b7280">—</span>';
@@ -1854,6 +1859,7 @@ tbody td:first-child{font-weight:700}
         ['Total Leads', n(clinicCur.leads)],
         ['Total Visits', n(clinicCur.visits)],
         ['Total Evals', n(clinicCur.evals)],
+        ['Evals Held', n(clinicCur.evalsHeld)],
         ['Conversions', n(clinicCur.convs)],
         ['Conv Rate', convBadge(convRate(clinicCur))],
         ['Cancel Rate', cancelBadge(exJRate)],
@@ -1878,7 +1884,8 @@ tbody td:first-child{font-weight:700}
           <div class="card-row"><span class="card-key">Visits</span><span class="card-val">${n(d.visits)}</span></div>
           <div class="card-row"><span class="card-key">Continuity Visits</span><span class="card-val">${opt(d.continuity)}</span></div>
           <div class="card-row"><span class="card-key">Complimentary</span><span class="card-val">${opt(d.complimentary)}</span></div>
-          <div class="card-row"><span class="card-key">Evals</span><span class="card-val">${n(d.evals)}</span></div>
+          <div class="card-row"><span class="card-key">Evals (Total)</span><span class="card-val">${n(d.evals)}</span></div>
+          <div class="card-row"><span class="card-key">Evals Held</span><span class="card-val">${n(d.evalsHeld)}</span></div>
           <div class="card-row"><span class="card-key">Conversions</span><span class="card-val">${n(d.convs)}</span></div>
           <div class="card-row"><span class="card-key">Conv Rate</span><span class="card-val">${convBadge(cRate)}</span></div>
           <div class="card-row"><span class="card-key">Sched Efficiency</span><span class="card-val">${effBadge(d.schedEff)}</span></div>
@@ -1894,7 +1901,7 @@ tbody td:first-child{font-weight:700}
     <div class="section-title">Visit Breakdown by Provider</div>
     <table>
       <thead><tr>
-        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Complimentary</th><th>Evals</th><th>Convs</th><th>Conv %</th><th>Sched Eff</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
+        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Complimentary</th><th>Evals</th><th>Held</th><th>Convs</th><th>Conv %</th><th>Sched Eff</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
       </tr></thead>
       <tbody>
         ${PT_LIST.map(pt => {
@@ -1905,6 +1912,7 @@ tbody td:first-child{font-weight:700}
             <td>${opt(d.continuity)}</td>
             <td>${opt(d.complimentary)}</td>
             <td>${n(d.evals)}</td>
+            <td>${n(d.evalsHeld)}</td>
             <td>${n(d.convs)}</td>
             <td>${n(d.pendingVisit)}</td>
             <td>${n(d.pendingCall)}</td>
@@ -1919,7 +1927,7 @@ tbody td:first-child{font-weight:700}
           <td style="color:#FFD70A">Clinic Total</td>
           <td>${n(clinicCur.visits)}</td>
           <td>—</td><td>—</td>
-          <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.convs)}</td>
+          <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.evalsHeld)}</td><td>${n(clinicCur.convs)}</td>
           <td>${n(clinicCur.pendingVisit)}</td><td>${n(clinicCur.pendingCall)}</td>
           <td>${convBadge(convRate(clinicCur))}</td>
           <td>—</td>
@@ -4407,31 +4415,41 @@ function weeklyCell(anchor, monthName, week) {
 
 // Parse GeneralVisitReport CSV → per-PT counts
 function parseGeneralVisitReport(buffer) {
-  const text = buffer.toString('utf8');
-  const lines = text.split('\n').filter(l => l.trim());
-  const data = {};
+  const XLSX = require('xlsx');
   const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
-  for (const pt of PT_NAMES) data[pt] = { evals: 0, visits: 0, continuity: 0, complimentary: 0 };
+  const data = {};
+  for (const pt of PT_NAMES) data[pt] = { evals: 0, evalsHeld: 0, visits: 0, continuity: 0, complimentary: 0 };
 
-  for (const line of lines) {
-    if (line.startsWith('Group By') || !line.trim()) continue;
-    const cols = line.split(',');
-    const provider = cols[4]?.trim().replace(/^"|"$/g,'');
-    const service = cols[5]?.trim().replace(/^"|"$/g,'');
+  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+  const today = new Date();
+  today.setHours(23, 59, 59, 999);
+
+  // Detail rows: col[1]=Patient, col[2]=Date of Service, col[3]=Status, col[4]=Provider, col[5]=Service
+  for (const row of rows) {
+    const provider = row[4];
+    const service  = row[5];
+    const dos      = row[2]; // Date object when cellDates:true
+
     if (!provider || !PT_NAMES.includes(provider)) continue;
+    if (!service) continue;
+
+    const svc = service.toLowerCase();
+    const isEval = svc.includes('evaluation') || service.includes('$50 Comprehensive');
+
     data[provider].visits++;
-    if (service && (service.toLowerCase().includes('evaluation') || service.includes('$50 Comprehensive'))) {
+    if (isEval) {
       data[provider].evals++;
+      if (dos instanceof Date && dos <= today) data[provider].evalsHeld++;
     }
-    if (service && service.toLowerCase().includes('continuity')) {
-      data[provider].continuity++;
-    }
-    if (service && service.toLowerCase().includes('complimentary')) {
-      data[provider].complimentary++;
-    }
+    if (svc.includes('continuity')) data[provider].continuity++;
+    if (svc.includes('complimentary')) data[provider].complimentary++;
   }
   return data;
 }
+
 
 // Parse AppointmentMetricsReport CSV → per-PT schedule efficiency
 function parseAppointmentMetrics(buffer) {
