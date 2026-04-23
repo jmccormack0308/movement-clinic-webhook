@@ -1627,6 +1627,15 @@ app.get('/dashboard', async (req, res) => {
     const curMonth = MONTHS[curMonthIdx];
     const clinicRows = tabData[CLINIC_TAB];
 
+    // Load latest metrics snapshot (written on each /metrics/submit)
+    let latestMetrics = null;
+    try {
+      const metricsPath = require('path').join(require('fs').existsSync('/data') ? '/data' : '/tmp', 'latest-metrics.json');
+      if (require('fs').existsSync(metricsPath)) {
+        latestMetrics = JSON.parse(require('fs').readFileSync(metricsPath, 'utf8'));
+      }
+    } catch(e) { console.error('Failed to load latest-metrics.json:', e.message); }
+
     // Fetch Notion conversion data (Package Purchased only)
     let notionConversions = {};
     try {
