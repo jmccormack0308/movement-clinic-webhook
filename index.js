@@ -4603,9 +4603,7 @@ async function getNotionConversions() {
     const monthKey = props['Month Key']?.formula?.string || '';
     if (!monthKey) continue;
 
-    // Filter client-side: only count Package Purchased (Deal Outcome is a formula)
     const dealOutcome = props['Deal Outcome']?.formula?.string || '';
-    if (dealOutcome !== 'Package Purchased') continue;
 
     // Evaluating Physical Therapist is multi_select — may be empty
     // Fall back to Employee Email formula field to derive PT name
@@ -4613,14 +4611,24 @@ async function getNotionConversions() {
     const empEmail = props['Employee Email']?.formula?.string || '';
     const pt = ptFromSelect || EMAIL_TO_PT[empEmail] || '';
 
-    if (!byMonth[monthKey]) { byMonth[monthKey] = { clinic: 0, pts: {} }; for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0; }
-    byMonth[monthKey].clinic++;
-    if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
+    if (!byMonth[monthKey]) {
+      byMonth[monthKey] = { clinic: 0, pts: {}, pendingNotion: 0, submissions: {}, pendingPts: {} };
+      for (const p of PT_NAMES_ALL) { byMonth[monthKey].pts[p] = 0; byMonth[monthKey].submissions[p] = 0; byMonth[monthKey].pendingPts[p] = 0; }
+    }
 
-    // Also track Pending (no subtype breakdown available in Notion)
-    const isPending = props['Deal Outcome']?.formula?.string === 'Pending';
-    if (isPending) {
+    // Count every record as a submission regardless of outcome
+    if (pt && PT_NAMES_ALL.includes(pt)) {
+      byMonth[monthKey].submissions[pt] = (byMonth[monthKey].submissions[pt] || 0) + 1;
+    }
+
+    if (dealOutcome === 'Package Purchased') {
+      byMonth[monthKey].clinic++;
+      if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
+    } else if (dealOutcome === 'Pending') {
       byMonth[monthKey].pendingNotion = (byMonth[monthKey].pendingNotion || 0) + 1;
+      if (pt && PT_NAMES_ALL.includes(pt)) {
+        byMonth[monthKey].pendingPts[pt] = (byMonth[monthKey].pendingPts[pt] || 0) + 1;
+      }
     }
   }
   return byMonth;
@@ -4693,7 +4701,11 @@ async function getAllConversions() {
     if (notion[key]) {
       merged[key].clinic        += notion[key].clinic || 0;
       merged[key].pendingNotion += notion[key].pendingNotion || 0;
-      for (const p of PT_NAMES_ALL) merged[key].pts[p] += notion[key].pts[p] || 0;
+      for (const p of PT_NAMES_ALL) {
+        merged[key].pts[p]        += notion[key].pts[p] || 0;
+        merged[key].submissions[p] += notion[key].submissions?.[p] || 0;
+        merged[key].pendingPts[p]  += notion[key].pendingPts?.[p] || 0;
+      }
     }
     if (sheet[key]) {
       merged[key].clinic       += sheet[key].clinic || 0;
