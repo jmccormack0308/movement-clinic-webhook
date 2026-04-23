@@ -1417,11 +1417,33 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+// POST /dashboard/auth — validate PIN and set session cookie
+app.post('/dashboard/auth', express.urlencoded({ extended: false }), (req, res) => {
+  const { pin } = req.body;
+  if (pin !== '2365') {
+    return res.send(`<!DOCTYPE html><html><head>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700&display=swap" rel="stylesheet">
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Montserrat',sans-serif;background:#F7F8FA;display:flex;align-items:center;justify-content:center;height:100vh}.box{text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:40px 48px}.lock{font-size:36px;margin-bottom:16px}.title{font-size:15px;font-weight:700;color:#232323;margin-bottom:6px}.sub{font-size:12px;color:#6b7280;margin-bottom:24px}.err{font-size:12px;color:#dc2626;margin-bottom:16px;font-weight:600}input{display:block;width:100%;padding:10px 14px;border:1px solid #e5e7eb;border-radius:6px;font-family:'Montserrat',sans-serif;font-size:13px;margin-bottom:10px}input:focus{outline:none;border-color:#0065A3}button{width:100%;padding:10px;background:#232323;color:#fff;border:none;border-radius:6px;font-family:'Montserrat',sans-serif;font-size:13px;font-weight:700;cursor:pointer}button:hover{background:#0065A3}</style>
+</head><body><div class="box">
+<div class="lock">🔒</div>
+<div class="title">Movement Clinic Dashboard</div>
+<div class="sub">Enter your PIN to continue</div>
+<div class="err">Incorrect PIN — try again</div>
+<form method="POST" action="/dashboard/auth">
+<input type="password" name="pin" placeholder="PIN" autofocus>
+<button type="submit">Unlock</button>
+</form></div></body></html>`);
+  }
+  res.setHeader('Set-Cookie', 'dashboard_auth=2365; Path=/dashboard; HttpOnly; SameSite=Strict; Max-Age=28800');
+  res.redirect('/dashboard');
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /dashboard-data — returns all clinic metrics as JSON (PIN protected)
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/dashboard-data', async (req, res) => {
-  if (req.query.pin !== '2365') return res.status(401).json({ error: 'Unauthorized' });
+  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')));
+  if (cookies.dashboard_auth !== '2365') return res.status(401).json({ error: 'Unauthorized' });
   try {
     const sheets = getGoogleSheetsClient();
     const SHEET_ID = CLINIC_METRICS_SHEET_ID;
@@ -1516,13 +1538,19 @@ app.get('/dashboard-data', async (req, res) => {
 // GET /dashboard — live HTML dashboard (PIN protected)
 // ─────────────────────────────────────────────────────────────────────────────
 app.get('/dashboard', async (req, res) => {
-  if (req.query.pin !== '2365') {
-    return res.send(`<!DOCTYPE html><html><body style="font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#F7F8FA">
-      <div style="text-align:center">
-        <div style="font-size:32px;margin-bottom:16px">🔒</div>
-        <form><input name="pin" type="password" placeholder="Enter PIN" style="padding:10px 16px;border:1px solid #e5e7eb;border-radius:6px;font-size:14px;margin-right:8px">
-        <button type="submit" style="padding:10px 20px;background:#232323;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer">Enter</button></form>
-      </div></body></html>`);
+  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(c => c.trim().split('=')));
+  if (cookies.dashboard_auth !== '2365') {
+    return res.send(`<!DOCTYPE html><html><head>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700&display=swap" rel="stylesheet">
+<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Montserrat',sans-serif;background:#F7F8FA;display:flex;align-items:center;justify-content:center;height:100vh}.box{text-align:center;background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:40px 48px}.lock{font-size:36px;margin-bottom:16px}.title{font-size:15px;font-weight:700;color:#232323;margin-bottom:6px}.sub{font-size:12px;color:#6b7280;margin-bottom:24px}input{display:block;width:100%;padding:10px 14px;border:1px solid #e5e7eb;border-radius:6px;font-family:'Montserrat',sans-serif;font-size:13px;margin-bottom:10px}input:focus{outline:none;border-color:#0065A3}button{width:100%;padding:10px;background:#232323;color:#fff;border:none;border-radius:6px;font-family:'Montserrat',sans-serif;font-size:13px;font-weight:700;cursor:pointer}button:hover{background:#0065A3}</style>
+</head><body><div class="box">
+<div class="lock">🔒</div>
+<div class="title">Movement Clinic Dashboard</div>
+<div class="sub">Enter your PIN to continue</div>
+<form method="POST" action="/dashboard/auth">
+<input type="password" name="pin" placeholder="PIN" autofocus>
+<button type="submit">Unlock</button>
+</form></div></body></html>`);
   }
 
   try {
