@@ -1748,6 +1748,10 @@ app.get('/dashboard', async (req, res) => {
     const exJVisits = exJordan.reduce((s,pt) => s + ptData[pt].visits, 0);
     const exJCancels = exJordan.reduce((s,pt) => s + ptData[pt].over24 + ptData[pt].late, 0);
     const exJRate = exJVisits ? (exJCancels / exJVisits * 100) : null;
+    const allPTs = [...exJordan, 'Jordan McCormack'];
+    const totalContinuity    = allPTs.reduce((s,pt) => s + (ptData[pt].continuity || 0), 0);
+    const totalComplimentary = allPTs.reduce((s,pt) => s + (ptData[pt].complimentary || 0), 0);
+    const contPctClinic      = clinicCur.visits ? (totalContinuity / clinicCur.visits * 100).toFixed(1) + '%' : '—';
 
     // Month-over-month table — all months with any data
     const momRows = [];
@@ -1809,7 +1813,7 @@ body{font-family:'Montserrat','Segoe UI',Arial,sans-serif;background:#F7F8FA;col
 .card-row{display:flex;flex-direction:row-reverse;justify-content:flex-end;gap:8px;padding:3px 0;border-bottom:1px solid #e5e7eb}
 .card-row:last-child{border-bottom:none}
 .card-key{color:#6b7280;font-weight:500;flex:1}
-.card-val{font-weight:700;color:#232323;min-width:36px;text-align:left}
+.card-val{font-weight:700;color:#232323;min-width:36px;text-align:left}.card-val .badge{display:block}
 .clinic-card{background:#232323;border-color:#232323;color:#fff}
 .clinic-card .card-label{color:#9CA3AF}
 .clinic-card .card-name{color:#FFD70A;border-bottom-color:#FFD70A}
@@ -1940,8 +1944,8 @@ tbody td:first-child{font-weight:700}
         <tr style="background:#232323;color:#fff;font-weight:700">
           <td style="color:#FFD70A">Clinic Total</td>
           <td>${n(clinicCur.visits)}</td>
-          <td>—</td><td>—</td>
-          <td>—</td>
+          <td>${n(totalContinuity)}</td><td>${contPctClinic}</td>
+          <td>${n(totalComplimentary)}</td>
           <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.evalsHeld)}</td>
           <td>${n(clinicCur.submissions)}</td>
           <td>${n(clinicCur.convs)}</td>
