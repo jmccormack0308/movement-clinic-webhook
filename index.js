@@ -4414,15 +4414,19 @@ function weeklyCell(anchor, monthName, week) {
 }
 
 // Parse GeneralVisitReport CSV → per-PT counts
-function parseGeneralVisitReport(buffer) {
-  const XLSX = require('xlsx');
+async function parseGeneralVisitReport(buffer) {
+  const ExcelJS = require('exceljs');
   const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
   const data = {};
   for (const pt of PT_NAMES) data[pt] = { evals: 0, evalsHeld: 0, visits: 0, continuity: 0, complimentary: 0 };
 
-  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.load(buffer);
+  const ws = wb.worksheets[0];
+  const rows = [];
+  ws.eachRow((row) => {
+    rows.push(row.values.slice(1)); // exceljs row.values is 1-indexed; slice(1) makes it 0-indexed
+  });
 
   const today = new Date();
   today.setHours(23, 59, 59, 999);
@@ -5446,7 +5450,7 @@ app.post('/metrics/submit', metricsUpload.fields([
 
     // ── 1. General Visit Report ──────────────────────────────
     if (files.generalVisits?.[0]) {
-      const visitData = parseGeneralVisitReport(files.generalVisits[0].buffer);
+      const visitData = await parseGeneralVisitReport(files.generalVisits[0].buffer);
       let clinicEvals = 0, clinicVisits = 0;
 
       for (const [pt, counts] of Object.entries(visitData)) {
@@ -5579,7 +5583,7 @@ app.post('/metrics/submit', metricsUpload.fields([
       const latestMetrics = {
         month, year, week,
         updatedAt: new Date().toISOString(),
-        visitData: files.generalVisits?.[0] ? parseGeneralVisitReport(files.generalVisits[0].buffer) : null,
+        visitData: files.generalVisits?.[0] ? await parseGeneralVisitReport(files.generalVisits[0].buffer) : null,
         schedEfficiency: files.appointmentMetrics?.[0] ? parseAppointmentMetrics(files.appointmentMetrics[0].buffer) : null,
       };
       const metricsPath = require('path').join(require('fs').existsSync('/data') ? '/data' : '/tmp', 'latest-metrics.json');
