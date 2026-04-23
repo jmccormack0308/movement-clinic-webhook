@@ -1637,11 +1637,10 @@ app.get('/dashboard', async (req, res) => {
 
     const MONTH_FULL = ['January','February','March','April','May','June','July','August','September','October','November','December'];
     function notionConvForMonth(month, year) {
-      // month is short name e.g. 'Apr', year is number e.g. 2026
       const idx = MONTHS.indexOf(month);
-      if (idx === -1) return { clinic: 0, pts: {} };
+      if (idx === -1) return { clinic: 0, pts: {}, pendingVisit: 0, pendingCall: 0, pendingNotion: 0 };
       const key = MONTH_FULL[idx] + ' ' + year;
-      return notionConversions[key] || { clinic: 0, pts: {} };
+      return notionConversions[key] || { clinic: 0, pts: {}, pendingVisit: 0, pendingCall: 0, pendingNotion: 0 };
     }
 
     // Pull current month data per PT
@@ -1649,14 +1648,24 @@ app.get('/dashboard', async (req, res) => {
       const rows = tabData[PT_TABS[pt]];
       const a = TABLE_ANCHORS.pt;
       const nc = notionConvForMonth(month, year);
+      // Pull continuity, complimentary, schedEff from latest snapshot if month/year matches
+      const isCurrentSnap = latestMetrics && latestMetrics.month === month && latestMetrics.year === year;
+      const snapPT = isCurrentSnap && latestMetrics.visitData ? latestMetrics.visitData[pt] : null;
+      const schedEff = isCurrentSnap && latestMetrics.schedEfficiency ? latestMetrics.schedEfficiency[pt] : null;
       return {
-        evals:  monthlyVal(rows, a.totalEvals, month, year) || 0,
-        convs:  nc.pts[pt] || 0,
-        visits: monthlyVal(rows, a.totalVisits, month, year) || 0,
-        over24: monthlyVal(rows, a.totalCancels24hr, month, year) || 0,
-        late:   monthlyVal(rows, a.totalLateCancels, month, year) || 0,
-        charts: lastWeekVal(weeklyVals(rows, a.totalOpenCharts, month)),
-        tasks:  lastWeekVal(weeklyVals(rows, a.totalOverdueTasks, month)),
+        evals:         monthlyVal(rows, a.totalEvals, month, year) || 0,
+        convs:         nc.pts[pt] || 0,
+        visits:        monthlyVal(rows, a.totalVisits, month, year) || 0,
+        over24:        monthlyVal(rows, a.totalCancels24hr, month, year) || 0,
+        late:          monthlyVal(rows, a.totalLateCancels, month, year) || 0,
+        charts:        lastWeekVal(weeklyVals(rows, a.totalOpenCharts, month)),
+        tasks:         lastWeekVal(weeklyVals(rows, a.totalOverdueTasks, month)),
+        continuity:    snapPT ? snapPT.continuity : null,
+        complimentary: snapPT ? snapPT.complimentary : null,
+        schedEff:      schedEff !== null ? schedEff : null,
+        pendingVisit:  nc.pendingVisit || 0,
+        pendingCall:   nc.pendingCall || 0,
+        pendingNotion: nc.pendingNotion || 0,
       };
     }
 
@@ -1664,14 +1673,17 @@ app.get('/dashboard', async (req, res) => {
       const a = TABLE_ANCHORS.clinic;
       const nc = notionConvForMonth(month, year);
       return {
-        leads:  monthlyVal(clinicRows, a.totalLeads, month, year) || 0,
-        evals:  monthlyVal(clinicRows, a.totalEvals, month, year) || 0,
-        convs:  nc.clinic || 0,
-        visits: monthlyVal(clinicRows, a.totalVisits, month, year) || 0,
-        over24: monthlyVal(clinicRows, a.totalCancels24hr, month, year) || 0,
-        late:   monthlyVal(clinicRows, a.totalLateCancels, month, year) || 0,
-        charts: lastWeekVal(weeklyVals(clinicRows, a.totalOpenCharts, month)),
-        tasks:  lastWeekVal(weeklyVals(clinicRows, a.totalOverdueTasks, month)),
+        leads:        monthlyVal(clinicRows, a.totalLeads, month, year) || 0,
+        evals:        monthlyVal(clinicRows, a.totalEvals, month, year) || 0,
+        convs:        nc.clinic || 0,
+        visits:       monthlyVal(clinicRows, a.totalVisits, month, year) || 0,
+        over24:       monthlyVal(clinicRows, a.totalCancels24hr, month, year) || 0,
+        late:         monthlyVal(clinicRows, a.totalLateCancels, month, year) || 0,
+        charts:       lastWeekVal(weeklyVals(clinicRows, a.totalOpenCharts, month)),
+        tasks:        lastWeekVal(weeklyVals(clinicRows, a.totalOverdueTasks, month)),
+        pendingVisit:  nc.pendingVisit || 0,
+        pendingCall:   nc.pendingCall || 0,
+        pendingNotion: nc.pendingNotion || 0,
       };
     }
 
@@ -1686,10 +1698,25 @@ app.get('/dashboard', async (req, res) => {
       if (rate >= 13) return `<span class="badge yellow">${pct}</span>`;
       return `<span class="badge green">${pct}</span>`;
     }
-    function schedEff(pt) {
-      // From appointment metrics — not in sheet, show — for now
-      return '—';
+    function convRate(d) {
+      if (!d.evals) return null;
+      return (d.convs / d.evals * 100);
     }
+    function convBadge(rate) {
+      if (rate === null) return '<span style="color:#6b7280">—</span>';
+      const pct = rate.toFixed(0) + '%';
+      if (rate >= 70) return `<span class="badge green">${pct}</span>`;
+      if (rate >= 50) return `<span class="badge yellow">${pct}</span>`;
+      return `<span class="badge red">${pct}</span>`;
+    }
+    function effBadge(pct) {
+      if (pct === null) return '<span style="color:#6b7280">—</span>';
+      const s = pct.toFixed(1) + '%';
+      if (pct >= 85) return `<span class="badge green">${s}</span>`;
+      if (pct >= 70) return `<span class="badge yellow">${s}</span>`;
+      return `<span class="badge red">${s}</span>`;
+    }
+    function opt(v, suffix='') { return v !== null ? v + suffix : '<span style="color:#6b7280">—</span>'; }
     function n(v) { return v ?? 0; }
 
     // Current month PT data
@@ -1811,17 +1838,41 @@ tbody td:first-child{font-weight:700}
   <!-- ══════════════ PAGE 1: WEEKLY MEETING ══════════════ -->
   <div class="page active" id="page-weekly">
     <div class="section-title">${curMonth} ${curYear} — Provider Snapshot</div>
+
+    <!-- Clinic Summary Bar -->
+    <div style="background:#232323;border-radius:8px;padding:14px 20px;margin-bottom:20px;display:flex;gap:0;flex-wrap:wrap">
+      ${[
+        ['Total Leads', n(clinicCur.leads)],
+        ['Total Visits', n(clinicCur.visits)],
+        ['Total Evals', n(clinicCur.evals)],
+        ['Conversions', n(clinicCur.convs)],
+        ['Conv Rate', convBadge(convRate(clinicCur))],
+        ['Cancel Rate', cancelBadge(exJRate)],
+        ['Open Charts', n(clinicCur.charts)],
+        ['Overdue Tasks', n(clinicCur.tasks)],
+      ].map(([k,v]) => `<div style="flex:1;min-width:100px;padding:6px 16px;border-right:1px solid #333;last-child{border:none}">
+        <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#9CA3AF;margin-bottom:4px">${k}</div>
+        <div style="font-size:16px;font-weight:700;color:#FFD70A">${v}</div>
+      </div>`).join('')}
+    </div>
+
+    <!-- Provider Cards -->
     <div class="cards">
       ${[...exJordan, 'Jordan McCormack'].map(pt => {
         const d = ptData[pt];
         const rate = cancelRate(d);
+        const cRate = convRate(d);
         const isJordan = pt === 'Jordan McCormack';
         return `<div class="card">
           <div class="card-label">${isJordan ? 'Owner / PT' : 'Physical Therapist'}</div>
           <div class="card-name" style="border-color:${PT_COLORS[pt]}">${pt}</div>
           <div class="card-row"><span class="card-key">Visits</span><span class="card-val">${n(d.visits)}</span></div>
+          <div class="card-row"><span class="card-key">Continuity Visits</span><span class="card-val">${opt(d.continuity)}</span></div>
+          <div class="card-row"><span class="card-key">Complimentary</span><span class="card-val">${opt(d.complimentary)}</span></div>
           <div class="card-row"><span class="card-key">Evals</span><span class="card-val">${n(d.evals)}</span></div>
           <div class="card-row"><span class="card-key">Conversions</span><span class="card-val">${n(d.convs)}</span></div>
+          <div class="card-row"><span class="card-key">Conv Rate</span><span class="card-val">${convBadge(cRate)}</span></div>
+          <div class="card-row"><span class="card-key">Sched Efficiency</span><span class="card-val">${effBadge(d.schedEff)}</span></div>
           <div class="card-row"><span class="card-key">Cancel Rate</span><span class="card-val">${cancelBadge(rate)}</span></div>
           <div class="card-row"><span class="card-key">&gt;24hr Cancels</span><span class="card-val">${n(d.over24)}</span></div>
           <div class="card-row"><span class="card-key">Late/No-Show</span><span class="card-val">${n(d.late)}</span></div>
@@ -1829,41 +1880,40 @@ tbody td:first-child{font-weight:700}
           <div class="card-row"><span class="card-key">Overdue Tasks</span><span class="card-val">${n(d.tasks)}</span></div>` : ''}
         </div>`;
       }).join('')}
-      <div class="card clinic-card">
-        <div class="card-label">Clinic Total</div>
-        <div class="card-name">Movement Clinic</div>
-        <div class="card-row"><span class="card-key">Total Leads</span><span class="card-val">${n(clinicCur.leads)}</span></div>
-        <div class="card-row"><span class="card-key">Total Visits</span><span class="card-val">${n(clinicCur.visits)}</span></div>
-        <div class="card-row"><span class="card-key">Total Evals</span><span class="card-val">${n(clinicCur.evals)}</span></div>
-        <div class="card-row"><span class="card-key">Total Conversions</span><span class="card-val">${n(clinicCur.convs)}</span></div>
-        <div class="card-row"><span class="card-key">Cancel Rate (ex Jordan)</span><span class="card-val">${cancelBadge(exJRate)}</span></div>
-        <div class="card-row"><span class="card-key">Open Charts</span><span class="card-val">${n(clinicCur.charts)}</span></div>
-        <div class="card-row"><span class="card-key">Overdue Tasks</span><span class="card-val">${n(clinicCur.tasks)}</span></div>
-      </div>
     </div>
 
     <div class="section-title">Visit Breakdown by Provider</div>
     <table>
       <thead><tr>
-        <th>Provider</th><th>Total Visits</th><th>Evals</th><th>Conversions</th><th>&gt;24hr Cancels</th><th>Late / No-Show</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
+        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Complimentary</th><th>Evals</th><th>Convs</th><th>Conv %</th><th>Sched Eff</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
       </tr></thead>
       <tbody>
         ${PT_LIST.map(pt => {
           const d = ptData[pt];
-          const rate = cancelRate(d);
           return `<tr>
             <td style="color:${PT_COLORS[pt]}">${pt}</td>
-            <td>${n(d.visits)}</td><td>${n(d.evals)}</td><td>${n(d.convs)}</td>
-            <td>${n(d.over24)}</td><td>${n(d.late)}</td>
-            <td>${cancelBadge(rate)}</td>
+            <td>${n(d.visits)}</td>
+            <td>${opt(d.continuity)}</td>
+            <td>${opt(d.complimentary)}</td>
+            <td>${n(d.evals)}</td>
+            <td>${n(d.convs)}</td>
+            <td>${n(d.pendingVisit)}</td>
+            <td>${n(d.pendingCall)}</td>
+            <td>${convBadge(convRate(d))}</td>
+            <td>${effBadge(d.schedEff)}</td>
+            <td>${cancelBadge(cancelRate(d))}</td>
             <td>${pt !== 'Jordan McCormack' ? n(d.charts) : '—'}</td>
             <td>${pt !== 'Jordan McCormack' ? n(d.tasks) : '—'}</td>
           </tr>`;
         }).join('')}
         <tr style="background:#232323;color:#fff;font-weight:700">
           <td style="color:#FFD70A">Clinic Total</td>
-          <td>${n(clinicCur.visits)}</td><td>${n(clinicCur.evals)}</td><td>${n(clinicCur.convs)}</td>
-          <td>${n(clinicCur.over24)}</td><td>${n(clinicCur.late)}</td>
+          <td>${n(clinicCur.visits)}</td>
+          <td>—</td><td>—</td>
+          <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.convs)}</td>
+          <td>${n(clinicCur.pendingVisit)}</td><td>${n(clinicCur.pendingCall)}</td>
+          <td>${convBadge(convRate(clinicCur))}</td>
+          <td>—</td>
           <td>${cancelBadge(exJRate)}</td>
           <td>${n(clinicCur.charts)}</td><td>${n(clinicCur.tasks)}</td>
         </tr>
@@ -4350,10 +4400,9 @@ function weeklyCell(anchor, monthName, week) {
 function parseGeneralVisitReport(buffer) {
   const text = buffer.toString('utf8');
   const lines = text.split('\n').filter(l => l.trim());
-  // Skip header line
   const data = {};
   const PT_NAMES = ['Chris Bostwick','TJ Aquino','John Gan','Jordan McCormack'];
-  for (const pt of PT_NAMES) data[pt] = { evals: 0, visits: 0, continuity: 0 };
+  for (const pt of PT_NAMES) data[pt] = { evals: 0, visits: 0, continuity: 0, complimentary: 0 };
 
   for (const line of lines) {
     if (line.startsWith('Group By') || !line.trim()) continue;
@@ -4361,15 +4410,15 @@ function parseGeneralVisitReport(buffer) {
     const provider = cols[4]?.trim().replace(/^"|"$/g,'');
     const service = cols[5]?.trim().replace(/^"|"$/g,'');
     if (!provider || !PT_NAMES.includes(provider)) continue;
-    // Count all visits
     data[provider].visits++;
-    // Evals
     if (service && (service.toLowerCase().includes('evaluation') || service.includes('$50 Comprehensive'))) {
       data[provider].evals++;
     }
-    // Continuity
     if (service && service.toLowerCase().includes('continuity')) {
       data[provider].continuity++;
+    }
+    if (service && service.toLowerCase().includes('complimentary')) {
+      data[provider].complimentary++;
     }
   }
   return data;
@@ -4522,6 +4571,12 @@ async function getNotionConversions() {
     if (!byMonth[monthKey]) { byMonth[monthKey] = { clinic: 0, pts: {} }; for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0; }
     byMonth[monthKey].clinic++;
     if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
+
+    // Also track Pending (no subtype breakdown available in Notion)
+    const isPending = props['Deal Outcome']?.formula?.string === 'Pending';
+    if (isPending) {
+      byMonth[monthKey].pendingNotion = (byMonth[monthKey].pendingNotion || 0) + 1;
+    }
   }
   return byMonth;
 }
@@ -4535,23 +4590,35 @@ async function getSheetConversions() {
   if (rows.length < 2) return {};
 
   const headers = rows[0].map(h => h.toLowerCase().trim());
-  const outcomeIdx = headers.findIndex(h => h.includes('outcome'));
-  const ptIdx = headers.findIndex(h => h.includes('evaluating pt') || h === 'evaluating_pt');
-  const tsIdx = headers.findIndex(h => h.includes('timestamp'));
+  const outcomeIdx    = headers.findIndex(h => h.includes('outcome') && !h.includes('subtype'));
+  const subtypeIdx    = headers.findIndex(h => h.includes('pending subtype') || h.includes('pending_subtype'));
+  const ptIdx         = headers.findIndex(h => h.includes('evaluating pt') || h === 'evaluating_pt');
+  const tsIdx         = headers.findIndex(h => h.includes('timestamp'));
 
   const byMonth = {};
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
-    const outcome = row[outcomeIdx]?.trim().toLowerCase() || '';
-    const pt = row[ptIdx]?.trim() || '';
-    const ts = row[tsIdx]?.trim() || '';
-    if (!outcome.includes('convert') || !ts) continue;
+    const outcome  = row[outcomeIdx]?.trim() || '';
+    const subtype  = row[subtypeIdx]?.trim().toUpperCase() || '';
+    const pt       = row[ptIdx]?.trim() || '';
+    const ts       = row[tsIdx]?.trim() || '';
+    if (!outcome || !ts) continue;
     const d = new Date(ts);
     if (isNaN(d.getTime())) continue;
     const monthKey = `${MONTH_FULL_NAMES[d.getMonth()]} ${d.getFullYear()}`;
-    if (!byMonth[monthKey]) { byMonth[monthKey] = { clinic: 0, pts: {} }; for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0; }
-    byMonth[monthKey].clinic++;
-    if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
+    if (!byMonth[monthKey]) {
+      byMonth[monthKey] = { clinic: 0, pts: {}, pendingVisit: 0, pendingCall: 0 };
+      for (const p of PT_NAMES_ALL) byMonth[monthKey].pts[p] = 0;
+    }
+
+    const outcomeLower = outcome.toLowerCase();
+    if (outcomeLower.includes('convert')) {
+      byMonth[monthKey].clinic++;
+      if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
+    } else if (outcomeLower === 'pending') {
+      if (subtype === 'PENDING_VISIT') byMonth[monthKey].pendingVisit++;
+      else if (subtype === 'PENDING_CALL') byMonth[monthKey].pendingCall++;
+    }
   }
   return byMonth;
 }
@@ -4565,10 +4632,19 @@ async function getAllConversions() {
   const merged = {};
   const allKeys = new Set([...Object.keys(notion), ...Object.keys(sheet)]);
   for (const key of allKeys) {
-    merged[key] = { clinic: 0, pts: {} };
+    merged[key] = { clinic: 0, pts: {}, pendingVisit: 0, pendingCall: 0, pendingNotion: 0 };
     for (const p of PT_NAMES_ALL) merged[key].pts[p] = 0;
-    if (notion[key]) { merged[key].clinic += notion[key].clinic; for (const p of PT_NAMES_ALL) merged[key].pts[p] += notion[key].pts[p] || 0; }
-    if (sheet[key])  { merged[key].clinic += sheet[key].clinic;  for (const p of PT_NAMES_ALL) merged[key].pts[p] += sheet[key].pts[p]  || 0; }
+    if (notion[key]) {
+      merged[key].clinic       += notion[key].clinic || 0;
+      merged[key].pendingNotion += notion[key].pendingNotion || 0;
+      for (const p of PT_NAMES_ALL) merged[key].pts[p] += notion[key].pts[p] || 0;
+    }
+    if (sheet[key]) {
+      merged[key].clinic       += sheet[key].clinic || 0;
+      merged[key].pendingVisit += sheet[key].pendingVisit || 0;
+      merged[key].pendingCall  += sheet[key].pendingCall || 0;
+      for (const p of PT_NAMES_ALL) merged[key].pts[p] += sheet[key].pts[p] || 0;
+    }
   }
   return merged;
 }
@@ -5470,6 +5546,18 @@ app.post('/metrics/submit', metricsUpload.fields([
     if (updates.length > 0) {
       await writeSheetUpdates(updates);
     }
+
+    // ── 7b. Save parsed metrics snapshot to /data for dashboard ──
+    try {
+      const latestMetrics = {
+        month, year, week,
+        updatedAt: new Date().toISOString(),
+        visitData: files.generalVisits?.[0] ? parseGeneralVisitReport(files.generalVisits[0].buffer) : null,
+        schedEfficiency: files.appointmentMetrics?.[0] ? parseAppointmentMetrics(files.appointmentMetrics[0].buffer) : null,
+      };
+      const metricsPath = require('path').join(require('fs').existsSync('/data') ? '/data' : '/tmp', 'latest-metrics.json');
+      require('fs').writeFileSync(metricsPath, JSON.stringify(latestMetrics));
+    } catch(e) { console.error('Failed to save latest-metrics.json:', e.message); }
 
     // ── 8. Send open charts emails to each PT ────────────────
     if (chartRows) {
