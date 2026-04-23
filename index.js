@@ -1735,6 +1735,27 @@ app.get('/dashboard', async (req, res) => {
       if (pct >= 70) return `<span class="badge yellow">${s}</span>`;
       return `<span class="badge red">${s}</span>`;
     }
+    function cancelText(rate) {
+      if (rate === null) return '<span style="color:#6b7280">—</span>';
+      const pct = rate.toFixed(1) + '%';
+      if (rate >= 15) return `<span style="color:#dc2626;font-weight:700">${pct}</span>`;
+      if (rate >= 13) return `<span style="color:#92400e;font-weight:700">${pct}</span>`;
+      return `<span style="color:#166534;font-weight:700">${pct}</span>`;
+    }
+    function convText(rate) {
+      if (rate === null) return '<span style="color:#6b7280">—</span>';
+      const pct = rate.toFixed(0) + '%';
+      if (rate >= 70) return `<span style="color:#166534;font-weight:700">${pct}</span>`;
+      if (rate >= 50) return `<span style="color:#92400e;font-weight:700">${pct}</span>`;
+      return `<span style="color:#dc2626;font-weight:700">${pct}</span>`;
+    }
+    function effText(pct) {
+      if (pct === null) return '<span style="color:#6b7280">—</span>';
+      const s = pct.toFixed(1) + '%';
+      if (pct >= 85) return `<span style="color:#166534;font-weight:700">${s}</span>`;
+      if (pct >= 70) return `<span style="color:#92400e;font-weight:700">${s}</span>`;
+      return `<span style="color:#dc2626;font-weight:700">${s}</span>`;
+    }
     function opt(v, suffix='') { return v !== null ? v + suffix : '<span style="color:#6b7280">—</span>'; }
     function n(v) { return v ?? 0; }
 
@@ -1813,7 +1834,7 @@ body{font-family:'Montserrat','Segoe UI',Arial,sans-serif;background:#F7F8FA;col
 .card-row{display:flex;flex-direction:row-reverse;justify-content:flex-end;gap:8px;padding:3px 0;border-bottom:1px solid #e5e7eb}
 .card-row:last-child{border-bottom:none}
 .card-key{color:#6b7280;font-weight:500;flex:1}
-.card-val{font-weight:700;color:#232323;min-width:36px;text-align:left}.card-val .badge{display:block}
+.card-val{font-weight:700;color:#232323;min-width:36px;text-align:left}
 .clinic-card{background:#232323;border-color:#232323;color:#fff}
 .clinic-card .card-label{color:#9CA3AF}
 .clinic-card .card-name{color:#FFD70A;border-bottom-color:#FFD70A}
@@ -1865,7 +1886,6 @@ tbody td:first-child{font-weight:700}
     <!-- Clinic Summary Bar -->
     <div style="background:#232323;border-radius:8px;padding:18px 20px;margin-bottom:20px;display:flex;gap:0;flex-wrap:wrap;align-items:center">
       ${[
-        ['Total Leads', n(clinicCur.leads)],
         ['Total Visits', n(clinicCur.visits)],
         ['Total Evals', n(clinicCur.evals)],
         ['Evals Held', n(clinicCur.evalsHeld)],
@@ -1900,11 +1920,11 @@ tbody td:first-child{font-weight:700}
           <div class="card-row"><span class="card-key">Evals Held</span><span class="card-val">${n(d.evalsHeld)}</span></div>
           <div class="card-row"><span class="card-key">Form Submissions</span><span class="card-val">${n(d.submissions)}</span></div>
           <div class="card-row"><span class="card-key">Conversions</span><span class="card-val">${n(d.convs)}</span></div>
-          <div class="card-row"><span class="card-key">Conversion Rate</span><span class="card-val">${convBadge(cRate)}</span></div>
+          <div class="card-row"><span class="card-key">Conversion Rate</span><span class="card-val">${convText(cRate)}</span></div>
           <div class="card-row"><span class="card-key">Pending</span><span class="card-val">${n(d.pending)}</span></div>
           <div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#232323;margin:10px 0 4px;border-bottom:1px solid #232323;padding-bottom:3px;">Efficiency</div>
-          <div class="card-row"><span class="card-key">Schedule Efficiency</span><span class="card-val">${effBadge(d.schedEff)}</span></div>
-          <div class="card-row"><span class="card-key">Cancel Rate</span><span class="card-val">${cancelBadge(rate)}</span></div>
+          <div class="card-row"><span class="card-key">Schedule Efficiency</span><span class="card-val">${effText(d.schedEff)}</span></div>
+          <div class="card-row"><span class="card-key">Cancel Rate</span><span class="card-val">${cancelText(rate)}</span></div>
           <div class="card-row"><span class="card-key">&gt;24hr Cancels</span><span class="card-val">${n(d.over24)}</span></div>
           <div class="card-row"><span class="card-key">Late / No-Show</span><span class="card-val">${n(d.late)}</span></div>
           ${!isJordan ? `<div style="font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;color:#232323;margin:10px 0 4px;border-bottom:1px solid #232323;padding-bottom:3px;">Admin</div>
