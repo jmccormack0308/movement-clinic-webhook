@@ -1665,6 +1665,8 @@ app.get('/dashboard', async (req, res) => {
         evals:         monthlyVal(rows, a.totalEvals, month, year) || 0,
         evalsHeld:     snapPT ? (snapPT.evalsHeld || 0) : 0,
         convs:         nc.pts[pt] || 0,
+        submissions:   nc.submissions?.[pt] || 0,
+        pending:       (nc.pendingPts?.[pt] || 0),
         visits:        monthlyVal(rows, a.totalVisits, month, year) || 0,
         over24:        monthlyVal(rows, a.totalCancels24hr, month, year) || 0,
         late:          monthlyVal(rows, a.totalLateCancels, month, year) || 0,
@@ -1698,6 +1700,8 @@ app.get('/dashboard', async (req, res) => {
         pendingVisit:  nc.pendingVisit || 0,
         pendingCall:   nc.pendingCall || 0,
         pendingNotion: nc.pendingNotion || 0,
+        submissions:   Object.values(nc.submissions || {}).reduce((s,v) => s+v, 0),
+        pending:       (nc.pendingVisit || 0) + (nc.pendingCall || 0) + (nc.pendingNotion || 0),
       };
     }
 
@@ -1901,9 +1905,24 @@ tbody td:first-child{font-weight:700}
 
     <div class="section-title">Visit Breakdown by Provider</div>
     <table>
-      <thead><tr>
-        <th>Provider</th><th>Visits</th><th>Continuity</th><th>Cont %</th><th>Complimentary</th><th>Evals</th><th>Held</th><th>Convs</th><th>Conv %</th><th>Sched Eff</th><th>Cancel Rate</th><th>Open Charts</th><th>Overdue Tasks</th>
-      </tr></thead>
+      <thead>
+        <tr style="background:#1a1a2e;color:#FFD70A;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:1px;">
+          <td></td>
+          <td colspan="3" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Volume</td>
+          <td colspan="1" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Compl.</td>
+          <td colspan="4" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Evals &amp; Conversions</td>
+          <td colspan="2" style="text-align:center;padding:4px 8px;border-right:2px solid #FFD70A;">Efficiency</td>
+          <td colspan="2" style="text-align:center;padding:4px 8px;">Admin</td>
+        </tr>
+        <tr>
+          <th>Provider</th>
+          <th>Visits</th><th>Continuity</th><th>Cont %</th>
+          <th style="border-right:2px solid #FFD70A;">Compl.</th>
+          <th>Evals</th><th>Held</th><th>Submissions</th><th>Convs</th><th>Conv %</th><th style="border-right:2px solid #FFD70A;">Pending</th>
+          <th>Sched Eff</th><th style="border-right:2px solid #FFD70A;">Cancel Rate</th>
+          <th>Open Charts</th><th>Overdue Tasks</th>
+        </tr>
+      </thead>
       <tbody>
         ${PT_LIST.map(pt => {
           const d = ptData[pt];
@@ -1913,13 +1932,15 @@ tbody td:first-child{font-weight:700}
             <td>${n(d.visits)}</td>
             <td>${opt(d.continuity)}</td>
             <td>${contPct}</td>
-            <td>${opt(d.complimentary)}</td>
+            <td style="border-right:2px solid #e5e7eb;">${opt(d.complimentary)}</td>
             <td>${n(d.evals)}</td>
             <td>${n(d.evalsHeld)}</td>
+            <td>${n(d.submissions)}</td>
             <td>${n(d.convs)}</td>
             <td>${convBadge(convRate(d))}</td>
+            <td style="border-right:2px solid #e5e7eb;">${n(d.pending)}</td>
             <td>${effBadge(d.schedEff)}</td>
-            <td>${cancelBadge(cancelRate(d))}</td>
+            <td style="border-right:2px solid #e5e7eb;">${cancelBadge(cancelRate(d))}</td>
             <td>${pt !== 'Jordan McCormack' ? n(d.charts) : '—'}</td>
             <td>${pt !== 'Jordan McCormack' ? n(d.tasks) : '—'}</td>
           </tr>`;
@@ -1927,11 +1948,15 @@ tbody td:first-child{font-weight:700}
         <tr style="background:#232323;color:#fff;font-weight:700">
           <td style="color:#FFD70A">Clinic Total</td>
           <td>${n(clinicCur.visits)}</td>
-          <td>—</td><td>—</td><td>—</td>
-          <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.evalsHeld)}</td><td>${n(clinicCur.convs)}</td>
+          <td>—</td><td>—</td>
+          <td style="border-right:2px solid #FFD70A;">—</td>
+          <td>${n(clinicCur.evals)}</td><td>${n(clinicCur.evalsHeld)}</td>
+          <td>${n(clinicCur.submissions)}</td>
+          <td>${n(clinicCur.convs)}</td>
           <td>${convBadge(convRate(clinicCur))}</td>
+          <td style="border-right:2px solid #FFD70A;">${n(clinicCur.pending)}</td>
           <td>—</td>
-          <td>${cancelBadge(exJRate)}</td>
+          <td style="border-right:2px solid #FFD70A;">${cancelBadge(exJRate)}</td>
           <td>${n(clinicCur.charts)}</td><td>${n(clinicCur.tasks)}</td>
         </tr>
       </tbody>
@@ -4640,12 +4665,23 @@ async function getSheetConversions() {
     }
 
     const outcomeLower = outcome.toLowerCase();
-    if (outcomeLower.includes('convert')) {
+    // Count total submissions per PT regardless of outcome
+    if (!byMonth[monthKey].submissions) byMonth[monthKey].submissions = {};
+    if (pt && PT_NAMES_ALL.includes(pt)) {
+      byMonth[monthKey].submissions[pt] = (byMonth[monthKey].submissions[pt] || 0) + 1;
+    }
+    byMonth[monthKey].totalSubmissions = (byMonth[monthKey].totalSubmissions || 0) + 1;
+
+    if (outcomeLower.includes('convert') && !outcomeLower.includes('not')) {
       byMonth[monthKey].clinic++;
       if (pt && PT_NAMES_ALL.includes(pt)) byMonth[monthKey].pts[pt]++;
     } else if (outcomeLower === 'pending') {
       if (subtype === 'PENDING_VISIT') byMonth[monthKey].pendingVisit++;
       else if (subtype === 'PENDING_CALL') byMonth[monthKey].pendingCall++;
+      if (!byMonth[monthKey].pendingPts) byMonth[monthKey].pendingPts = {};
+      if (pt && PT_NAMES_ALL.includes(pt)) {
+        byMonth[monthKey].pendingPts[pt] = (byMonth[monthKey].pendingPts[pt] || 0) + 1;
+      }
     }
   }
   return byMonth;
@@ -4660,10 +4696,10 @@ async function getAllConversions() {
   const merged = {};
   const allKeys = new Set([...Object.keys(notion), ...Object.keys(sheet)]);
   for (const key of allKeys) {
-    merged[key] = { clinic: 0, pts: {}, pendingVisit: 0, pendingCall: 0, pendingNotion: 0 };
-    for (const p of PT_NAMES_ALL) merged[key].pts[p] = 0;
+    merged[key] = { clinic: 0, pts: {}, pendingVisit: 0, pendingCall: 0, pendingNotion: 0, submissions: {}, pendingPts: {} };
+    for (const p of PT_NAMES_ALL) { merged[key].pts[p] = 0; merged[key].submissions[p] = 0; merged[key].pendingPts[p] = 0; }
     if (notion[key]) {
-      merged[key].clinic       += notion[key].clinic || 0;
+      merged[key].clinic        += notion[key].clinic || 0;
       merged[key].pendingNotion += notion[key].pendingNotion || 0;
       for (const p of PT_NAMES_ALL) merged[key].pts[p] += notion[key].pts[p] || 0;
     }
@@ -4671,7 +4707,11 @@ async function getAllConversions() {
       merged[key].clinic       += sheet[key].clinic || 0;
       merged[key].pendingVisit += sheet[key].pendingVisit || 0;
       merged[key].pendingCall  += sheet[key].pendingCall || 0;
-      for (const p of PT_NAMES_ALL) merged[key].pts[p] += sheet[key].pts[p] || 0;
+      for (const p of PT_NAMES_ALL) {
+        merged[key].pts[p]        += sheet[key].pts[p] || 0;
+        merged[key].submissions[p] += sheet[key].submissions?.[p] || 0;
+        merged[key].pendingPts[p]  += sheet[key].pendingPts?.[p] || 0;
+      }
     }
   }
   return merged;
