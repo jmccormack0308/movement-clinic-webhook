@@ -466,8 +466,12 @@ OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The syste
 
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
+OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
+
+CLINICAL SUMMARY RULE: Only populate clinical_summary when outcome is EVAL_SCHEDULED. For all other outcomes set clinical_summary to null. When populated, extract only what was explicitly stated in the transcript — do not infer or guess. If a field was not discussed, use null for that field.
+
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent"}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent","clinical_summary":{"problem_areas":"chief complaint and body regions affected, or null","symptom_duration":"how long they have had the issue e.g. 3 weeks, 6 months, or null","prior_care":"any previous PT, chiro, injections, surgery, or other conservative care mentioned, or null","goals":"what they want to get back to doing, or null","plan_of_care_discussed":"any mention of visit packages, number of visits, cost discussions, or specific plan types e.g. 10-visit plan, or null","objections":"any hesitations, concerns, or objections raised during the call e.g. cost concern, insurance question, needs to check schedule, or null"}}}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -1106,6 +1110,115 @@ app.post('/webhook', async (req, res) => {
     });
 
     await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, callBlocks);
+
+    // ── EVAL SCHEDULED: Notify #evaluations-scheduled with clinical summary ──────
+    if (claudeResult.outcome === 'EVAL_SCHEDULED') {
+      try {
+        const EVALS_SCHEDULED_CHANNEL = 'C07T7PK0GAE';
+        const PT_SLACK_IDS = {
+          'John Gan':       'U07TJC6GZFG',
+          'TJ Aquino':      'U0A9DL4RTKN',
+          'Chris Bostwick': 'U091NMDKTFV',
+          'Shane Abbott':   'U07SAF0R2NQ',
+          'Katy Vieira':    'U08REDY0146'
+        };
+
+        const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : 'https://movement-clinic-webhook-production.up.railway.app';
+
+        const evalName  = encodeURIComponent(finalContactName || '');
+        const evalPhone = encodeURIComponent(contactPhone || '');
+        const evalEmail = encodeURIComponent(contact.email || '');
+        const evalPT    = encodeURIComponent(teamMember || '');
+        const postEvalUrl = `${BASE_URL}/post-eval?name=${evalName}&phone=${evalPhone}&email=${evalEmail}&pt=${evalPT}`;
+
+        const ptSlackId = teamMember ? PT_SLACK_IDS[teamMember] : null;
+        const ptTag = ptSlackId ? `<@${ptSlackId}>` : (teamMember || 'Not identified');
+
+        const cs = claudeResult.clinical_summary || {};
+
+        const score = parseInt(claudeResult.confidence_score) || 0;
+        const confidenceEmoji = score >= 90 ? ':large_green_circle:' : score >= 80 ? ':large_yellow_circle:' : ':red_circle:';
+        const ghlUrl = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
+
+        await axios.post(
+          'https://slack.com/api/chat.postMessage',
+          {
+            channel: EVALS_SCHEDULED_CHANNEL,
+            text: `Eval scheduled — ${capitalizeFullName(finalContactName || 'Unknown')}`,
+            blocks: [
+              {
+                type: 'header',
+                text: { type: 'plain_text', text: '📅 Evaluation Scheduled', emoji: true }
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `${confidenceEmoji} *${score}% Confident in Transcript Interpretation*${claudeResult.confidence_reason ? '\n_' + claudeResult.confidence_reason + '_' : ''}` }
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Patient*\n${capitalizeFullName(finalContactName || 'Unknown')}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${contactPhone || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*PT on Call*\n${ptTag}` },
+                  { type: 'mrkdwn', text: `*Source Pipeline*\n${PIPELINE_NAMES[finalPipelineId] || 'Unknown'}` }
+                ]
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: '*🩺 Clinical Summary*' }
+              },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Problem / Pain Areas*\n${cs.problem_areas || '_Not mentioned_'}` },
+                  { type: 'mrkdwn', text: `*Duration of Symptoms*\n${cs.symptom_duration || '_Not mentioned_'}` },
+                  { type: 'mrkdwn', text: `*Prior Care*\n${cs.prior_care || '_Not mentioned_'}` },
+                  { type: 'mrkdwn', text: `*Long-Term Goals*\n${cs.goals || '_Not mentioned_'}` }
+                ]
+              },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Plan of Care Discussed*\n${cs.plan_of_care_discussed || '_Not discussed_'}` },
+                  { type: 'mrkdwn', text: `*Hesitations / Objections*\n${cs.objections ? ':warning: ' + cs.objections : ':white_check_mark: None raised'}` }
+                ]
+              },
+              { type: 'divider' },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Open Post-Eval Form →' },
+                    url: postEvalUrl,
+                    style: 'primary'
+                  },
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Open in GHL' },
+                    url: ghlUrl
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            headers: {
+              'Authorization': `Bearer ${SLACK_BOT_TOKEN}`,
+              'Content-Type': 'application/json'
+            }
+          }
+        );
+        console.log('Eval scheduled clinical summary sent to #evaluations-scheduled');
+      } catch (evalSlackErr) {
+        console.error('Failed to send #evaluations-scheduled notification:', evalSlackErr.response?.data || evalSlackErr.message);
+      }
+    }
+    // ── END EVAL SCHEDULED ────────────────────────────────────────────────────────
 
     // Email generation + GHL summary webhook fire after Slack — non-blocking for team visibility
     try {
@@ -3942,7 +4055,12 @@ app.post('/post-eval', async (req, res) => {
     let customerOppCreated = false;
 
     if (!customerOpp) {
-      console.log('No Customer Pipeline opportunity found — creating one at Evaluation Scheduled');
+      // ── FALLBACK: No Customer Pipeline card found ─────────────────────────────
+      // GHL native workflow should have created this when the lead pipeline card
+      // moved to Eval Scheduled. If we're here, that workflow didn't fire.
+      // Claude creates the card, runs it through the full stage sequence,
+      // and fires alerts to both Slack channels flagging the retroactive creation.
+      console.log('No Customer Pipeline opportunity found — retroactive creation (GHL workflow did not fire)');
       const patientFullNameTemp = `${patient_first_name} ${patient_last_name}`;
       customerOpp = await createGHLOpportunity(
         contact.id,
@@ -3951,15 +4069,130 @@ app.post('/post-eval', async (req, res) => {
         patientFullNameTemp
       );
       customerOppCreated = true;
-      console.log(`Created Customer Pipeline opportunity: ${customerOpp.id}`);
+      console.log(`Retroactive Customer Pipeline opportunity created: ${customerOpp.id}`);
+
+      // Notify #evaluations-scheduled — flag that this came AFTER post-eval form submission
+      try {
+        const EVALS_SCHEDULED_CHANNEL = 'C07T7PK0GAE';
+        const PT_SLACK_IDS_EVAL = {
+          'John Gan':       'U07TJC6GZFG',
+          'TJ Aquino':      'U0A9DL4RTKN',
+          'Chris Bostwick': 'U091NMDKTFV',
+          'Shane Abbott':   'U07SAF0R2NQ',
+          'Katy Vieira':    'U08REDY0146'
+        };
+        const ptSlackIdRetro = PT_SLACK_IDS_EVAL[evaluating_pt];
+        const ptTagRetro = ptSlackIdRetro ? `<@${ptSlackIdRetro}>` : (evaluating_pt || 'Unknown PT');
+        const ghlUrlRetro = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
+
+        await axios.post(
+          'https://slack.com/api/chat.postMessage',
+          {
+            channel: EVALS_SCHEDULED_CHANNEL,
+            text: `⚠️ Retroactive eval card created for ${patientFullNameTemp} — post-eval form already submitted`,
+            blocks: [
+              {
+                type: 'header',
+                text: { type: 'plain_text', text: '⚠️ Retroactive Evaluation Card Created', emoji: true }
+              },
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `*This message was triggered by a post-eval form submission — no "Evaluation Scheduled" Customer Pipeline card existed at the time of submission.*\n\nClaude has created the card retroactively and is running it through the stage sequence now. The GHL native workflow did not fire as expected.`
+                }
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Patient*\n${patientFullNameTemp}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${patient_phone || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Evaluating PT*\n${ptTagRetro}` },
+                  { type: 'mrkdwn', text: `*Outcome*\n${outcome || 'Unknown'}` }
+                ]
+              },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Open in GHL' },
+                    url: ghlUrlRetro
+                  }
+                ]
+              }
+            ]
+          },
+          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        console.log('Retroactive card alert sent to #evaluations-scheduled');
+      } catch (retroEvalSlackErr) {
+        console.error('Failed to send retroactive alert to #evaluations-scheduled:', retroEvalSlackErr.response?.data || retroEvalSlackErr.message);
+      }
+
+      // Notify #deals-board-conversions — flag same situation
+      try {
+        const DEALS_BOARD_CHANNEL = 'C0AU8CDTN4R';
+        const PT_SLACK_IDS_DEALS = {
+          'John Gan':       'U07TJC6GZFG',
+          'TJ Aquino':      'U0A9DL4RTKN',
+          'Chris Bostwick': 'U091NMDKTFV',
+          'Shane Abbott':   'U07SAF0R2NQ',
+          'Katy Vieira':    'U08REDY0146'
+        };
+        const katieSlackId = PT_SLACK_IDS_DEALS['Katy Vieira'];
+        const shaneSlackId = PT_SLACK_IDS_DEALS['Shane Abbott'];
+        const evalPtSlackId = PT_SLACK_IDS_DEALS[evaluating_pt];
+        const tagLine = [
+          evalPtSlackId ? `<@${evalPtSlackId}>` : evaluating_pt,
+          `<@${katieSlackId}>`,
+          `<@${shaneSlackId}>`
+        ].join(' ');
+
+        await axios.post(
+          'https://slack.com/api/chat.postMessage',
+          {
+            channel: DEALS_BOARD_CHANNEL,
+            text: `⚠️ Heads up — retroactive Customer Pipeline card created for ${patientFullNameTemp}`,
+            blocks: [
+              {
+                type: 'header',
+                text: { type: 'plain_text', text: '⚠️ Retroactive Pipeline Card — Action May Be Needed', emoji: true }
+              },
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `${tagLine}\n\nA post-eval form was submitted for *${patientFullNameTemp}* but no "Evaluation Scheduled" Customer Pipeline card existed. Claude created it retroactively and will advance it to the appropriate stage based on the form outcome (*${outcome || 'Unknown'}*).\n\nPlease verify the GHL card looks correct.`
+                }
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Patient*\n${patientFullNameTemp}` },
+                  { type: 'mrkdwn', text: `*Evaluating PT*\n${evaluating_pt || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Form Outcome*\n${outcome || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${patient_phone || 'Unknown'}` }
+                ]
+              }
+            ]
+          },
+          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        console.log('Retroactive card alert sent to #deals-board-conversions');
+      } catch (retroDealsSlackErr) {
+        console.error('Failed to send retroactive alert to #deals-board-conversions:', retroDealsSlackErr.response?.data || retroDealsSlackErr.message);
+      }
     }
 
-    // Always move to Evaluation Held first and pause 60 seconds for GHL to record the stage
+    // Move to Evaluation Held first — 10 second pause so GHL records the stage touch
     console.log('Moving to Evaluation Held stage...');
     await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.EVALUATION_HELD, null);
-    console.log('Waiting 60 seconds for GHL to record Evaluation Held stage...');
-    await new Promise(resolve => setTimeout(resolve, 60000));
-    console.log('60 second pause complete — proceeding with outcome stage');
+    console.log('Waiting 10 seconds for GHL to record Evaluation Held stage...');
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    console.log('10 second pause complete — proceeding with outcome stage');
 
     // Analyze transcript with Claude
     const claudeResult = await analyzeEvalWithClaude(transcript, outcome);
@@ -4074,7 +4307,81 @@ app.post('/post-eval', async (req, res) => {
       noteLines.push(`Physician: ${claudeResult.physician_name}${claudeResult.physician_office ? ` — ${claudeResult.physician_office}` : ''}`);
     }
 
-    // Update Customer Pipeline opportunity stage
+    // If Claude could not determine the correct stage, alert the team in #deals-board-conversions
+    if (!newStageId) {
+      try {
+        const DEALS_BOARD_CHANNEL = 'C0AU8CDTN4R';
+        const PT_SLACK_IDS_UNCLEAR = {
+          'John Gan':       'U07TJC6GZFG',
+          'TJ Aquino':      'U0A9DL4RTKN',
+          'Chris Bostwick': 'U091NMDKTFV',
+          'Shane Abbott':   'U07SAF0R2NQ',
+          'Katy Vieira':    'U08REDY0146'
+        };
+        const evalPtUnclearId = PT_SLACK_IDS_UNCLEAR[evaluating_pt];
+        const katieUnclearId  = PT_SLACK_IDS_UNCLEAR['Katy Vieira'];
+        const shaneUnclearId  = PT_SLACK_IDS_UNCLEAR['Shane Abbott'];
+        const tagLineUnclear = [
+          evalPtUnclearId ? `<@${evalPtUnclearId}>` : evaluating_pt,
+          `<@${katieUnclearId}>`,
+          `<@${shaneUnclearId}>`
+        ].join(' ');
+        const ghlUrlUnclear = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
+        const patientFullName = `${patient_first_name} ${patient_last_name}`;
+
+        await axios.post(
+          'https://slack.com/api/chat.postMessage',
+          {
+            channel: DEALS_BOARD_CHANNEL,
+            text: `❓ Unclear pipeline stage for ${patientFullName} — manual update needed`,
+            blocks: [
+              {
+                type: 'header',
+                text: { type: 'plain_text', text: '❓ Stage Unclear — Manual GHL Update Needed', emoji: true }
+              },
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `${tagLineUnclear}\n\nClaude could not determine the correct Customer Pipeline stage for *${patientFullName}* based on the post-eval form submission. The card is currently at *Evaluation Held*. Please review and move it to the correct stage manually.`
+                }
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Patient*\n${patientFullName}` },
+                  { type: 'mrkdwn', text: `*Evaluating PT*\n${evaluating_pt || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Form Outcome*\n${outcome || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${patient_phone || 'Unknown'}` }
+                ]
+              },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Open in GHL' },
+                    url: ghlUrlUnclear
+                  }
+                ]
+              }
+            ]
+          },
+          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        console.log('Unclear stage alert sent to #deals-board-conversions');
+      } catch (unclearSlackErr) {
+        console.error('Failed to send unclear stage alert:', unclearSlackErr.response?.data || unclearSlackErr.message);
+      }
+    }
+
+    // 10 second pause so GHL records Evaluation Held before we advance to final stage
+    console.log('Waiting 10 seconds before advancing to final outcome stage...');
+    await new Promise(resolve => setTimeout(resolve, 10000));
+    console.log('10 second pause complete');
+
+    // Update Customer Pipeline opportunity to final stage
     if (newStageId) {
       await updateGHLOpportunity(customerOpp.id, EVAL_CUSTOMER_PIPELINE_ID, newStageId, null);
       console.log(`Customer Pipeline updated to stage: ${newStageId}`);
