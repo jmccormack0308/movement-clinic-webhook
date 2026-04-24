@@ -436,7 +436,7 @@ DECISION RULES:
 
 2. NAME EXTRACTION: If the contact name is unknown or a placeholder, attempt to extract the caller name from the transcript. Look for introductions. If found set extracted_name to that name, otherwise null.
 
-3. ATTRIBUTION: If this is a new contact with no existing pipeline, look for attribution signals in the transcript (Facebook ad mention, Google search, referral, website). Use this to select the most appropriate pipeline. Default to Incoming Calls if unclear.
+3. ATTRIBUTION: If this is a new contact with no existing pipeline, look for attribution signals in the transcript (Facebook ad mention, Google search, referral, website). Use this to select the most appropriate pipeline. Default to Incoming Calls ONLY if the call is clearly from a prospective patient seeking PT services. If the call is not clearly patient-related, use OUTCOME H or I below — never default to Incoming Calls for irrelevant calls.
 
 4. FOLLOW UP TIMEFRAME: If the person requests follow up at a specific future time, extract that timeframe as a number of days from today. For example "call me in 2 months" = 60, "reach out next January" = calculate from today, "in a few weeks" = 21. Set follow_up_days to this number if applicable, otherwise null.
 
@@ -464,14 +464,16 @@ OUTCOME F - VOICEMAIL: A voicemail was left. The system will automatically advan
 
 OUTCOME G - NO CONTACT: No answer, no voicemail, call under 5 seconds. The system will automatically advance the day/week stage. Set action to UPDATE and return current pipeline ID and null for new_stage_id. Log the attempt.
 
-OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
+OUTCOME H - NOT_A_PATIENT_CALL: You are confident this call has nothing to do with physical therapy services or becoming a patient. Examples: vendor solicitation, internal staff call, wrong department, delivery or service call, unrelated business inquiry. Set action to NO_ACTION. Return null for new_stage_id and new_pipeline_id. No contact or opportunity will be created. Do not use this outcome if there is any ambiguity — use OUTCOME I instead.
+
+OUTCOME I - UNSURE: The transcript is too ambiguous, too short, or unclear enough that you cannot confidently determine the intent or appropriate action. This includes calls where the purpose is partially intelligible but does not clearly fit any other outcome. Set action to NO_ACTION. Return null for new_stage_id and new_pipeline_id. A task and Slack alert will be created for human review. Use this outcome rather than forcing a fit into outcomes A-G when genuinely uncertain.
 
 OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a specific service with a discussed price. Do not guess. If uncertain return null.
 
 CLINICAL SUMMARY RULE: Only populate clinical_summary when outcome is EVAL_SCHEDULED. For all other outcomes set clinical_summary to null. When populated, extract only what was explicitly stated in the transcript — do not infer or guess. If a field was not discussed, use null for that field.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent","clinical_summary":{"problem_areas":"chief complaint and body regions affected, or null","symptom_duration":"how long they have had the issue e.g. 3 weeks, 6 months, or null","prior_care":"any previous PT, chiro, injections, surgery, or other conservative care mentioned, or null","goals":"what they want to get back to doing, or null","plan_of_care_discussed":"any mention of visit packages, number of visits, cost discussions, or specific plan types e.g. 10-visit plan, or null","objections":"any hesitations, concerns, or objections raised during the call e.g. cost concern, insurance question, needs to check schedule, or null"}}}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NOT_A_PATIENT_CALL or UNSURE","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent","clinical_summary":{"problem_areas":"chief complaint and body regions affected, or null","symptom_duration":"how long they have had the issue e.g. 3 weeks, 6 months, or null","prior_care":"any previous PT, chiro, injections, surgery, or other conservative care mentioned, or null","goals":"what they want to get back to doing, or null","plan_of_care_discussed":"any mention of visit packages, number of visits, cost discussions, or specific plan types e.g. 10-visit plan, or null","objections":"any hesitations, concerns, or objections raised during the call e.g. cost concern, insurance question, needs to check schedule, or null"}}}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -906,6 +908,106 @@ app.post('/webhook', async (req, res) => {
     );
 
     console.log(`Claude decision: ${claudeResult.outcome}`);
+
+    // ── NOT_A_PATIENT_CALL: confident this call is unrelated to PT services ──────
+    // Silent exit — no contact created, no opportunity, no Slack, no GHL changes.
+    // Note added only if a GHL contact already existed.
+    if (claudeResult.outcome === 'NOT_A_PATIENT_CALL') {
+      console.log(`NOT_A_PATIENT_CALL — skipping all GHL and Slack actions for ${contactPhone}`);
+      if (contact && !isNewContact) {
+        try {
+          await addNoteToContact(contact.id, `Claude AI Assistant:\n\n${getTimestamp()}\n\nCall identified as unrelated to PT services. No pipeline action taken.\n\n${claudeResult.note || ''}`);
+        } catch (noteErr) {
+          console.error('Failed to add not-a-patient-call note:', noteErr.message);
+        }
+      }
+      return; // exit setImmediate — no further processing
+    }
+
+    // ── UNSURE: transcript too ambiguous to act on ────────────────────────────────
+    // No pipeline changes. Add note if contact exists. Create GHL task for info@.
+    // Send Slack alert to #claude-pipeline-manager.
+    if (claudeResult.outcome === 'UNSURE') {
+      console.log(`UNSURE outcome — creating task and Slack alert for ${contactPhone}`);
+      const ts = getTimestamp();
+      const unsureNote = `Claude AI Assistant:\n\n${ts}\n\nUNSURE — Claude could not confidently determine the intent of this call. No pipeline changes made. Manual review required.\n\n${claudeResult.note || ''}${claudeResult.confidence_reason ? '\n\nConfidence reason: ' + claudeResult.confidence_reason : ''}`;
+
+      if (contact && !isNewContact) {
+        try {
+          await addNoteToContact(contact.id, unsureNote);
+        } catch (noteErr) {
+          console.error('Failed to add unsure note:', noteErr.message);
+        }
+      }
+
+      // Create GHL task assigned to info@movementclinicpt.com
+      try {
+        const dueDate = new Date();
+        dueDate.setDate(dueDate.getDate() + 1);
+        await createGHLTask(contact.id, `Claude Unsure — Manual Review Needed (${capitalizeFullName(contactName || 'Unknown')})`, dueDate);
+        console.log('Unsure task created for info@');
+      } catch (taskErr) {
+        console.error('Failed to create unsure task:', taskErr.message);
+      }
+
+      // Slack alert to #claude-pipeline-manager
+      try {
+        const score = parseInt(claudeResult.confidence_score) || 0;
+        const ghlUrl = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
+        await axios.post(
+          'https://slack.com/api/chat.postMessage',
+          {
+            channel: PIPELINE_MANAGER_CHANNEL,
+            text: `❓ Claude was unsure about this call — manual review needed`,
+            blocks: [
+              {
+                type: 'header',
+                text: { type: 'plain_text', text: '❓ Unsure — Manual Review Needed', emoji: true }
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `:red_circle: *${score}% Confident*${claudeResult.confidence_reason ? '\n_' + claudeResult.confidence_reason + '_' : ''}` }
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                fields: [
+                  { type: 'mrkdwn', text: `*Name*\n${capitalizeFullName(contactName || 'Unknown')}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${contactPhone || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Call Time*\n${ts}` },
+                  { type: 'mrkdwn', text: `*Team Member*\n${teamMember || 'Not identified'}` }
+                ]
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `*What Claude observed*\n${claudeResult.note || 'No summary available.'}` }
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `_A GHL task has been created and assigned to info@movementclinicpt.com for manual review._` }
+              },
+              {
+                type: 'actions',
+                elements: [
+                  {
+                    type: 'button',
+                    text: { type: 'plain_text', text: 'Open in GHL' },
+                    url: ghlUrl
+                  }
+                ]
+              }
+            ]
+          },
+          { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+        );
+        console.log('Unsure alert sent to #claude-pipeline-manager');
+      } catch (unsureSlackErr) {
+        console.error('Failed to send unsure Slack alert:', unsureSlackErr.response?.data || unsureSlackErr.message);
+      }
+
+      return; // exit setImmediate — no further processing
+    }
+    // ── END UNSURE / NOT_A_PATIENT_CALL ──────────────────────────────────────────
 
     // Update contact name if extracted from transcript
     let finalContactName = contactName;
