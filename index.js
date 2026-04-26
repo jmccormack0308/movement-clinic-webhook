@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const { mountMcp } = require('./mcp-sheets');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -1730,6 +1731,15 @@ app.post('/update-sot', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ============================================================
+// MCP — Read-only Sheets access for Claude in conversation
+// ============================================================
+// Auth: OAuth 2.1 + PKCE (compatible with Claude.ai connector UI)
+// Master fallback token: MCP_AUTH_TOKEN env var
+// Allowlist: MCP_ALLOWED_SHEETS env var, format "Name:ID,Name:ID"
+// Mounts all OAuth discovery endpoints + /mcp JSON-RPC route
+mountMcp(app);
 
 app.get('/health', (req, res) => {
   const heartbeatAgeMin = lastHeartbeatTime

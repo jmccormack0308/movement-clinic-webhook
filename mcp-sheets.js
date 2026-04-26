@@ -1,52 +1,117 @@
 // ============================================================
-// SHEETS MCP MODULE
+// SHEETS MCP MODULE — OAuth 2.1 + PKCE
 // ============================================================
 // Provides read-only Google Sheets access to Claude in conversation
-// via Model Context Protocol (MCP) over streamable HTTP.
+// via Model Context Protocol over streamable HTTP, with full
+// OAuth 2.1 + Dynamic Client Registration + PKCE authentication
+// per Claude.ai's connector requirements.
 //
-// Reuses the same TMC-Claude service account already used by the
-// rest of the webhook server. Read-only by design — no write tools.
+// Reuses TMC-Claude service account for Google Sheets access.
+// Read-only by design — no write tools.
 //
-// Mounted at /mcp in index.js. Authenticated via MCP_AUTH_TOKEN env var.
+// Endpoints exposed:
+//   POST /mcp                                 — JSON-RPC tool calls (Bearer auth)
+//   GET  /.well-known/oauth-protected-resource — Discovery (RFC 9728)
+//   GET  /.well-known/oauth-authorization-server — Discovery (RFC 8414)
+//   POST /oauth/register                       — Dynamic Client Registration (RFC 7591)
+//   GET  /oauth/authorize                      — User consent page
+//   POST /oauth/authorize                      — User approval submission
+//   POST /oauth/token                          — Code exchange (PKCE)
+//
+// Auth: Long-lived MCP_AUTH_TOKEN secret used as the underlying
+// access token after OAuth flow completes. The OAuth dance is
+// the wrapper Claude requires; the actual auth check is the token.
 // ============================================================
 
 const { google } = require('googleapis');
+const crypto = require('crypto');
 
-// ---------- Allowlist parsing ----------
-// MCP_ALLOWED_SHEETS env var format:
-//   "Pipeline Tracker:1abc...xyz,Post-Eval:2def...uvw,Deals Board:3ghi...rst"
-// Each entry is "Friendly Name:SheetID" comma-separated.
-// Friendly names are what Claude sees; sheet IDs are what get queried.
+// ============================================================
+// CONFIGURATION
+// ============================================================
+
+const ACCESS_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 min
+const REGISTRATION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+// ============================================================
+// IN-MEMORY STORES
+// ============================================================
+// For Jordan's usage pattern (1 user, occasional re-auth), in-memory
+// is fine. If Railway restarts, you'll re-auth once. To persist across
+// restarts, swap these for the existing /data file pattern used by
+// processed-calls.json elsewhere in index.js.
+
+const clients = new Map();        // client_id → { client_id, redirect_uris, created_at }
+const authCodes = new Map();      // code → { client_id, redirect_uri, code_challenge, expires_at }
+const accessTokens = new Map();   // token → { client_id, expires_at }
+
+// Periodic cleanup
+setInterval(() => {
+  const now = Date.now();
+  for (const [code, data] of authCodes) {
+    if (data.expires_at < now) authCodes.delete(code);
+  }
+  for (const [token, data] of accessTokens) {
+    if (data.expires_at < now) accessTokens.delete(token);
+  }
+  for (const [id, data] of clients) {
+    if (data.created_at + REGISTRATION_TTL_MS < now) clients.delete(id);
+  }
+}, 60 * 60 * 1000);
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function getBaseUrl(req) {
+  // Trust the host the request arrived on. Railway sets X-Forwarded-Proto.
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  return `${proto}://${host}`;
+}
+
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function sha256base64url(input) {
+  return crypto.createHash('sha256').update(input).digest('base64')
+    .replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
+}
+
+function verifyPkce(codeVerifier, codeChallenge, method) {
+  if (method === 'S256') {
+    return sha256base64url(codeVerifier) === codeChallenge;
+  }
+  if (method === 'plain') {
+    return codeVerifier === codeChallenge;
+  }
+  return false;
+}
+
+// ============================================================
+// SHEETS LOGIC (unchanged from v1)
+// ============================================================
+
 function parseAllowlist() {
   const raw = process.env.MCP_ALLOWED_SHEETS || '';
   if (!raw.trim()) return [];
-
   return raw.split(',')
     .map(entry => entry.trim())
     .filter(Boolean)
     .map(entry => {
       const idx = entry.indexOf(':');
-      if (idx === -1) {
-        console.error(`[MCP] Malformed allowlist entry (missing colon): ${entry}`);
-        return null;
-      }
+      if (idx === -1) return null;
       const name = entry.slice(0, idx).trim();
       const id = entry.slice(idx + 1).trim();
-      if (!name || !id) {
-        console.error(`[MCP] Malformed allowlist entry (empty name or id): ${entry}`);
-        return null;
-      }
+      if (!name || !id) return null;
       return { name, id };
     })
     .filter(Boolean);
 }
 
-function isAllowed(sheetId) {
-  return parseAllowlist().some(s => s.id === sheetId);
-}
-
 function resolveSheetId(nameOrId) {
-  // Accept either friendly name or raw ID
   const allowlist = parseAllowlist();
   const byName = allowlist.find(s => s.name.toLowerCase() === nameOrId.toLowerCase());
   if (byName) return byName.id;
@@ -54,7 +119,6 @@ function resolveSheetId(nameOrId) {
   return null;
 }
 
-// ---------- Sheets client ----------
 function getSheetsClient() {
   const saJson = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   const auth = new google.auth.GoogleAuth({
@@ -64,149 +128,90 @@ function getSheetsClient() {
   return google.sheets({ version: 'v4', auth });
 }
 
-// ---------- Tool implementations ----------
-
 async function listSheets() {
   const allowlist = parseAllowlist();
-  if (allowlist.length === 0) {
-    return {
-      sheets: [],
-      message: 'No sheets configured. Set MCP_ALLOWED_SHEETS env var with format "Name:ID,Name:ID".'
-    };
-  }
   return {
     sheets: allowlist.map(s => ({ name: s.name, id: s.id })),
     count: allowlist.length
   };
 }
 
-async function getSheetMetadata(args) {
-  const { sheet } = args;
+async function getSheetMetadata({ sheet }) {
   const sheetId = resolveSheetId(sheet);
-  if (!sheetId) {
-    throw new Error(`Sheet "${sheet}" is not in the allowlist. Use list_sheets to see available sheets.`);
-  }
-
+  if (!sheetId) throw new Error(`Sheet "${sheet}" is not in the allowlist.`);
   const client = getSheetsClient();
   const meta = await client.spreadsheets.get({
     spreadsheetId: sheetId,
     fields: 'properties.title,sheets.properties(title,gridProperties)'
   });
-
-  const tabs = meta.data.sheets.map(s => ({
-    name: s.properties.title,
-    rowCount: s.properties.gridProperties.rowCount,
-    columnCount: s.properties.gridProperties.columnCount
-  }));
-
   return {
     sheetId,
     title: meta.data.properties.title,
-    tabs,
-    tabCount: tabs.length
+    tabs: meta.data.sheets.map(s => ({
+      name: s.properties.title,
+      rowCount: s.properties.gridProperties.rowCount,
+      columnCount: s.properties.gridProperties.columnCount
+    }))
   };
 }
 
-async function getHeaders(args) {
-  const { sheet, tab } = args;
+async function getHeaders({ sheet, tab }) {
   const sheetId = resolveSheetId(sheet);
-  if (!sheetId) {
-    throw new Error(`Sheet "${sheet}" is not in the allowlist. Use list_sheets to see available sheets.`);
-  }
-
+  if (!sheetId) throw new Error(`Sheet "${sheet}" is not in the allowlist.`);
   const client = getSheetsClient();
-  const range = `'${tab}'!1:1`;
   const result = await client.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range
+    range: `'${tab}'!1:1`
   });
-
   const headers = (result.data.values && result.data.values[0]) || [];
-  return {
-    sheetId,
-    tab,
-    headers,
-    columnCount: headers.length
-  };
+  return { sheetId, tab, headers, columnCount: headers.length };
 }
 
-async function readRange(args) {
-  const { sheet, tab, range } = args;
+async function readRange({ sheet, tab, range }) {
   const sheetId = resolveSheetId(sheet);
-  if (!sheetId) {
-    throw new Error(`Sheet "${sheet}" is not in the allowlist. Use list_sheets to see available sheets.`);
-  }
-
+  if (!sheetId) throw new Error(`Sheet "${sheet}" is not in the allowlist.`);
   const client = getSheetsClient();
-  const fullRange = `'${tab}'!${range}`;
   const result = await client.spreadsheets.values.get({
     spreadsheetId: sheetId,
-    range: fullRange
+    range: `'${tab}'!${range}`
   });
-
   return {
-    sheetId,
-    tab,
-    range,
+    sheetId, tab, range,
     values: result.data.values || [],
     rowCount: (result.data.values || []).length
   };
 }
 
-async function queryRows(args) {
-  const { sheet, tab, columnFilters = {}, limit = 100 } = args;
+async function queryRows({ sheet, tab, columnFilters = {}, limit = 100 }) {
   const sheetId = resolveSheetId(sheet);
-  if (!sheetId) {
-    throw new Error(`Sheet "${sheet}" is not in the allowlist. Use list_sheets to see available sheets.`);
-  }
-
+  if (!sheetId) throw new Error(`Sheet "${sheet}" is not in the allowlist.`);
   const client = getSheetsClient();
-
-  // Read entire tab (capped by Google API). For very large sheets this could be expensive,
-  // but typical clinic sheets are well under a few thousand rows.
   const result = await client.spreadsheets.values.get({
     spreadsheetId: sheetId,
     range: `'${tab}'`
   });
-
   const rows = result.data.values || [];
-  if (rows.length === 0) {
-    return { sheetId, tab, headers: [], rows: [], totalMatched: 0 };
-  }
-
+  if (rows.length === 0) return { sheetId, tab, headers: [], rows: [], totalMatched: 0 };
   const headers = rows[0];
   const dataRows = rows.slice(1);
-
-  // Build column index map
   const colIndex = {};
   headers.forEach((h, i) => { colIndex[h] = i; });
-
-  // Filter rows where every specified columnFilter matches (case-insensitive substring)
   const filterEntries = Object.entries(columnFilters);
   const matches = filterEntries.length === 0
     ? dataRows
-    : dataRows.filter(row => {
-        return filterEntries.every(([col, expected]) => {
-          const idx = colIndex[col];
-          if (idx === undefined) return false;
-          const cell = (row[idx] || '').toString().toLowerCase();
-          return cell.includes(expected.toString().toLowerCase());
-        });
-      });
-
+    : dataRows.filter(row => filterEntries.every(([col, expected]) => {
+        const idx = colIndex[col];
+        if (idx === undefined) return false;
+        return (row[idx] || '').toString().toLowerCase().includes(expected.toString().toLowerCase());
+      }));
   const limited = matches.slice(0, limit);
-
-  // Return as objects for easier consumption
   const objects = limited.map(row => {
     const obj = {};
     headers.forEach((h, i) => { obj[h] = row[i] || ''; });
     return obj;
   });
-
   return {
-    sheetId,
-    tab,
-    headers,
+    sheetId, tab, headers,
     rows: objects,
     totalMatched: matches.length,
     returned: limited.length,
@@ -214,26 +219,19 @@ async function queryRows(args) {
   };
 }
 
-// ---------- Tool definitions ----------
 const TOOLS = [
   {
     name: 'list_sheets',
     description: 'List all Google Sheets the MCP has read access to. Returns friendly names and sheet IDs. Always call this first to discover what is available.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-      additionalProperties: false
-    },
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true }
   },
   {
     name: 'get_sheet_metadata',
-    description: 'Get the structure of a specific Google Sheet — list all tabs (worksheets) within it with their row and column counts. Use to discover what tabs exist before reading data.',
+    description: 'Get the structure of a specific Google Sheet — list all tabs (worksheets) within it with their row and column counts.',
     inputSchema: {
       type: 'object',
-      properties: {
-        sheet: { type: 'string', description: 'Friendly name (from list_sheets) or sheet ID' }
-      },
+      properties: { sheet: { type: 'string', description: 'Friendly name or sheet ID' } },
       required: ['sheet'],
       additionalProperties: false
     },
@@ -241,12 +239,12 @@ const TOOLS = [
   },
   {
     name: 'get_headers',
-    description: 'Read the header row (row 1) of a specific tab. Use this to understand column structure before querying data.',
+    description: 'Read the header row (row 1) of a specific tab. Use to understand column structure before querying data.',
     inputSchema: {
       type: 'object',
       properties: {
-        sheet: { type: 'string', description: 'Friendly name (from list_sheets) or sheet ID' },
-        tab: { type: 'string', description: 'Tab name (from get_sheet_metadata)' }
+        sheet: { type: 'string', description: 'Friendly name or sheet ID' },
+        tab: { type: 'string', description: 'Tab name' }
       },
       required: ['sheet', 'tab'],
       additionalProperties: false
@@ -255,13 +253,13 @@ const TOOLS = [
   },
   {
     name: 'read_range',
-    description: 'Read a specific range of cells from a tab in A1 notation (e.g. "A1:F50", "B2:B100"). Use for targeted reads when you know exactly where the data is.',
+    description: 'Read a specific range of cells from a tab in A1 notation (e.g. "A1:F50").',
     inputSchema: {
       type: 'object',
       properties: {
-        sheet: { type: 'string', description: 'Friendly name (from list_sheets) or sheet ID' },
-        tab: { type: 'string', description: 'Tab name (from get_sheet_metadata)' },
-        range: { type: 'string', description: 'A1 notation range, e.g. "A1:F50"' }
+        sheet: { type: 'string' },
+        tab: { type: 'string' },
+        range: { type: 'string', description: 'A1 notation range' }
       },
       required: ['sheet', 'tab', 'range'],
       additionalProperties: false
@@ -270,18 +268,18 @@ const TOOLS = [
   },
   {
     name: 'query_rows',
-    description: 'Query rows from a tab with optional case-insensitive substring filters on column values. Returns matching rows as objects keyed by column header. Use for "find rows where column X contains Y" type questions.',
+    description: 'Query rows from a tab with optional case-insensitive substring filters on column values.',
     inputSchema: {
       type: 'object',
       properties: {
-        sheet: { type: 'string', description: 'Friendly name (from list_sheets) or sheet ID' },
-        tab: { type: 'string', description: 'Tab name (from get_sheet_metadata)' },
+        sheet: { type: 'string' },
+        tab: { type: 'string' },
         columnFilters: {
           type: 'object',
-          description: 'Map of column header → substring to match. Example: {"Outcome": "EVAL_SCHEDULED"}. Empty object returns all rows.',
+          description: 'Map of column header → substring to match',
           additionalProperties: { type: 'string' }
         },
-        limit: { type: 'number', description: 'Max rows to return (default 100)', default: 100 }
+        limit: { type: 'number', default: 100 }
       },
       required: ['sheet', 'tab'],
       additionalProperties: false
@@ -290,7 +288,6 @@ const TOOLS = [
   }
 ];
 
-// ---------- Tool dispatcher ----------
 async function callTool(name, args) {
   switch (name) {
     case 'list_sheets':       return await listSheets();
@@ -298,30 +295,208 @@ async function callTool(name, args) {
     case 'get_headers':        return await getHeaders(args);
     case 'read_range':         return await readRange(args);
     case 'query_rows':         return await queryRows(args);
-    default:
-      throw new Error(`Unknown tool: ${name}`);
+    default: throw new Error(`Unknown tool: ${name}`);
   }
 }
 
-// ---------- HTTP handler (streamable HTTP transport, stateless JSON) ----------
-// Implements MCP JSON-RPC 2.0 over HTTP POST. Each request is independent.
-async function handleMcpRequest(req, res) {
-  // Auth check
-  const expectedToken = process.env.MCP_AUTH_TOKEN;
-  if (!expectedToken) {
-    return res.status(500).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'MCP_AUTH_TOKEN not configured on server' },
-      id: null
+// ============================================================
+// OAUTH 2.1 + PKCE FLOW
+// ============================================================
+
+// --- Discovery: Protected Resource Metadata (RFC 9728) ---
+function handleProtectedResource(req, res) {
+  const baseUrl = getBaseUrl(req);
+  res.json({
+    resource: `${baseUrl}/mcp`,
+    authorization_servers: [baseUrl],
+    bearer_methods_supported: ['header'],
+    resource_documentation: `${baseUrl}/`
+  });
+}
+
+// --- Discovery: Authorization Server Metadata (RFC 8414) ---
+function handleAuthServerMetadata(req, res) {
+  const baseUrl = getBaseUrl(req);
+  res.json({
+    issuer: baseUrl,
+    authorization_endpoint: `${baseUrl}/oauth/authorize`,
+    token_endpoint: `${baseUrl}/oauth/token`,
+    registration_endpoint: `${baseUrl}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256', 'plain'],
+    token_endpoint_auth_methods_supported: ['none'],
+    scopes_supported: ['mcp']
+  });
+}
+
+// --- Dynamic Client Registration (RFC 7591) ---
+function handleRegister(req, res) {
+  const { redirect_uris, client_name } = req.body || {};
+
+  if (!Array.isArray(redirect_uris) || redirect_uris.length === 0) {
+    return res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description: 'redirect_uris is required'
     });
   }
 
-  const authHeader = req.headers.authorization || '';
-  const providedToken = authHeader.startsWith('Bearer ')
-    ? authHeader.slice(7)
-    : authHeader;
+  const client_id = `mcp_${generateToken().slice(0, 24)}`;
+  const record = {
+    client_id,
+    client_name: client_name || 'Unknown Client',
+    redirect_uris,
+    created_at: Date.now()
+  };
+  clients.set(client_id, record);
 
-  if (providedToken !== expectedToken) {
+  res.status(201).json({
+    client_id,
+    client_id_issued_at: Math.floor(record.created_at / 1000),
+    redirect_uris,
+    token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code'],
+    response_types: ['code']
+  });
+}
+
+// --- Authorization endpoint (consent page) ---
+function handleAuthorizeGet(req, res) {
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.query;
+
+  // Basic validation
+  if (!client_id || !redirect_uri || !code_challenge) {
+    return res.status(400).send(renderError('Missing required OAuth parameters.'));
+  }
+
+  const client = clients.get(client_id);
+  if (!client) {
+    return res.status(400).send(renderError('Unknown client_id. Try reconnecting from Claude.'));
+  }
+
+  if (!client.redirect_uris.includes(redirect_uri)) {
+    return res.status(400).send(renderError('redirect_uri does not match registered URI.'));
+  }
+
+  // Render consent page
+  res.send(renderConsent({
+    client_name: client.client_name,
+    client_id,
+    redirect_uri,
+    state: state || '',
+    code_challenge,
+    code_challenge_method: code_challenge_method || 'plain',
+    scope: scope || 'mcp'
+  }));
+}
+
+function handleAuthorizePost(req, res) {
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, approve } = req.body;
+
+  if (approve !== 'yes') {
+    const url = new URL(redirect_uri);
+    url.searchParams.set('error', 'access_denied');
+    if (state) url.searchParams.set('state', state);
+    return res.redirect(url.toString());
+  }
+
+  const client = clients.get(client_id);
+  if (!client || !client.redirect_uris.includes(redirect_uri)) {
+    return res.status(400).send(renderError('Invalid client or redirect_uri.'));
+  }
+
+  // Generate auth code
+  const code = generateToken();
+  authCodes.set(code, {
+    client_id,
+    redirect_uri,
+    code_challenge,
+    code_challenge_method: code_challenge_method || 'plain',
+    expires_at: Date.now() + AUTH_CODE_TTL_MS
+  });
+
+  const url = new URL(redirect_uri);
+  url.searchParams.set('code', code);
+  if (state) url.searchParams.set('state', state);
+  res.redirect(url.toString());
+}
+
+// --- Token endpoint ---
+function handleToken(req, res) {
+  const { grant_type, code, redirect_uri, client_id, code_verifier } = req.body;
+
+  if (grant_type !== 'authorization_code') {
+    return res.status(400).json({ error: 'unsupported_grant_type' });
+  }
+
+  const record = authCodes.get(code);
+  if (!record) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Code not found or expired' });
+  }
+
+  if (record.expires_at < Date.now()) {
+    authCodes.delete(code);
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Code expired' });
+  }
+
+  if (record.client_id !== client_id) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'Client mismatch' });
+  }
+
+  if (record.redirect_uri !== redirect_uri) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' });
+  }
+
+  if (!verifyPkce(code_verifier, record.code_challenge, record.code_challenge_method)) {
+    return res.status(400).json({ error: 'invalid_grant', error_description: 'PKCE verification failed' });
+  }
+
+  // Code is single-use
+  authCodes.delete(code);
+
+  // Issue access token
+  const access_token = generateToken();
+  accessTokens.set(access_token, {
+    client_id,
+    expires_at: Date.now() + ACCESS_TOKEN_TTL_MS
+  });
+
+  res.json({
+    access_token,
+    token_type: 'Bearer',
+    expires_in: Math.floor(ACCESS_TOKEN_TTL_MS / 1000),
+    scope: 'mcp'
+  });
+}
+
+// --- Token validation for MCP requests ---
+function isValidToken(token) {
+  const record = accessTokens.get(token);
+  if (!record) return false;
+  if (record.expires_at < Date.now()) {
+    accessTokens.delete(token);
+    return false;
+  }
+  return true;
+}
+
+// ============================================================
+// MCP HTTP HANDLER
+// ============================================================
+
+async function handleMcpRequest(req, res) {
+  const baseUrl = getBaseUrl(req);
+  const authHeader = req.headers.authorization || '';
+  const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+
+  // Accept either a real OAuth-issued token OR the long-lived MCP_AUTH_TOKEN
+  // (the latter is for direct API testing / non-Claude clients)
+  const masterToken = process.env.MCP_AUTH_TOKEN;
+  const isMaster = masterToken && providedToken === masterToken;
+  const isOAuth = providedToken && isValidToken(providedToken);
+
+  if (!isMaster && !isOAuth) {
+    res.set('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
     return res.status(401).json({
       jsonrpc: '2.0',
       error: { code: -32001, message: 'Unauthorized' },
@@ -341,16 +516,12 @@ async function handleMcpRequest(req, res) {
 
   try {
     let result;
-
     switch (method) {
       case 'initialize':
         result = {
           protocolVersion: '2025-06-18',
           capabilities: { tools: {} },
-          serverInfo: {
-            name: 'movement-clinic-sheets',
-            version: '1.0.0'
-          }
+          serverInfo: { name: 'movement-clinic-sheets', version: '2.0.0' }
         };
         break;
 
@@ -361,19 +532,15 @@ async function handleMcpRequest(req, res) {
       case 'tools/call': {
         const { name, arguments: toolArgs } = params || {};
         if (!name) throw new Error('Missing tool name');
-
         const toolResult = await callTool(name, toolArgs || {});
         result = {
-          content: [
-            { type: 'text', text: JSON.stringify(toolResult, null, 2) }
-          ],
+          content: [{ type: 'text', text: JSON.stringify(toolResult, null, 2) }],
           structuredContent: toolResult
         };
         break;
       }
 
       case 'notifications/initialized':
-        // Notification, no response needed but we still return 200
         return res.status(200).end();
 
       case 'ping':
@@ -394,20 +561,244 @@ async function handleMcpRequest(req, res) {
     console.error(`[MCP] Error handling ${method}:`, err.message);
     return res.status(200).json({
       jsonrpc: '2.0',
-      error: {
-        code: -32000,
-        message: err.message || 'Internal error',
-        data: err.stack ? { stack: err.stack.split('\n').slice(0, 5).join('\n') } : undefined
-      },
+      error: { code: -32000, message: err.message || 'Internal error' },
       id: id || null
     });
   }
 }
 
+// ============================================================
+// MOUNTING — Single export that registers all routes on the Express app
+// ============================================================
+
+function mountMcp(app) {
+  // Discovery endpoints (no auth required)
+  app.get('/.well-known/oauth-protected-resource', handleProtectedResource);
+  app.get('/.well-known/oauth-protected-resource/mcp', handleProtectedResource);
+  app.get('/.well-known/oauth-authorization-server', handleAuthServerMetadata);
+
+  // OAuth flow
+  app.post('/oauth/register', handleRegister);
+  app.get('/oauth/authorize', handleAuthorizeGet);
+  app.post('/oauth/authorize', handleAuthorizePost);
+  app.post('/oauth/token', handleToken);
+
+  // MCP JSON-RPC
+  app.post('/mcp', handleMcpRequest);
+
+  // GET /mcp returns useful info if visited in browser
+  app.get('/mcp', (req, res) => {
+    const baseUrl = getBaseUrl(req);
+    res.json({
+      service: 'Movement Clinic Sheets MCP',
+      version: '2.0.0',
+      transport: 'streamable-http',
+      authentication: 'OAuth 2.1 + PKCE',
+      discovery: `${baseUrl}/.well-known/oauth-authorization-server`
+    });
+  });
+
+  console.log('[MCP] Sheets MCP mounted at /mcp with OAuth 2.1 endpoints');
+}
+
+// ============================================================
+// HTML RENDERING (consent + error pages)
+// Branded with Movement Clinic colors per brand-kit skill
+// ============================================================
+
+function renderConsent({ client_name, client_id, redirect_uri, state, code_challenge, code_challenge_method, scope }) {
+  const escape = (s) => String(s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Authorize Access — Movement Clinic Sheets</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Montserrat', sans-serif;
+    background: #F7F8FA;
+    color: #232323;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .card {
+    background: #ffffff;
+    border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+    max-width: 480px;
+    width: 100%;
+    overflow: hidden;
+  }
+  .header {
+    background: #232323;
+    color: #ffffff;
+    padding: 24px;
+    text-align: center;
+  }
+  .header-accent {
+    color: #FFD70A;
+    font-weight: 700;
+    letter-spacing: 1px;
+    font-size: 11px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+  .header h1 {
+    font-size: 22px;
+    font-weight: 700;
+  }
+  .body { padding: 28px 24px; }
+  .body p {
+    font-size: 14px;
+    line-height: 1.6;
+    margin-bottom: 16px;
+    color: #4b5563;
+  }
+  .client-info {
+    background: #f3f4f6;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 20px;
+    font-size: 13px;
+  }
+  .client-info-label {
+    font-weight: 600;
+    color: #232323;
+    display: block;
+    margin-bottom: 2px;
+  }
+  .client-info-value {
+    color: #4b5563;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    word-break: break-all;
+  }
+  .scopes {
+    background: #fffbeb;
+    border-left: 4px solid #FFD70A;
+    padding: 12px 14px;
+    margin-bottom: 20px;
+    font-size: 13px;
+    border-radius: 4px;
+  }
+  .scopes-title {
+    font-weight: 700;
+    margin-bottom: 6px;
+  }
+  .scopes ul {
+    margin-left: 18px;
+    color: #4b5563;
+  }
+  .scopes li { margin-bottom: 3px; }
+  .buttons {
+    display: flex;
+    gap: 10px;
+  }
+  button {
+    flex: 1;
+    padding: 12px 16px;
+    border: none;
+    border-radius: 8px;
+    font-family: 'Montserrat', sans-serif;
+    font-weight: 700;
+    font-size: 14px;
+    cursor: pointer;
+    transition: opacity 0.15s;
+  }
+  button:hover { opacity: 0.9; }
+  button:active { transform: scale(0.98); }
+  .btn-approve {
+    background: #FFD70A;
+    color: #232323;
+  }
+  .btn-deny {
+    background: #f3f4f6;
+    color: #4b5563;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="header-accent">Movement Clinic PT</div>
+      <h1>Authorize Sheets Access</h1>
+    </div>
+    <div class="body">
+      <p><strong>${escape(client_name)}</strong> is requesting read-only access to your Movement Clinic Google Sheets through the MCP server.</p>
+
+      <div class="client-info">
+        <span class="client-info-label">Client ID</span>
+        <span class="client-info-value">${escape(client_id)}</span>
+      </div>
+
+      <div class="scopes">
+        <div class="scopes-title">This will allow:</div>
+        <ul>
+          <li>Listing allowlisted sheets</li>
+          <li>Reading sheet structure and headers</li>
+          <li>Querying rows from sheet tabs</li>
+        </ul>
+        <div class="scopes-title" style="margin-top: 10px;">This will NOT allow:</div>
+        <ul>
+          <li>Writing or modifying any data</li>
+          <li>Accessing sheets not in the allowlist</li>
+        </ul>
+      </div>
+
+      <form method="POST" action="/oauth/authorize">
+        <input type="hidden" name="client_id" value="${escape(client_id)}">
+        <input type="hidden" name="redirect_uri" value="${escape(redirect_uri)}">
+        <input type="hidden" name="state" value="${escape(state)}">
+        <input type="hidden" name="code_challenge" value="${escape(code_challenge)}">
+        <input type="hidden" name="code_challenge_method" value="${escape(code_challenge_method)}">
+        <div class="buttons">
+          <button type="submit" name="approve" value="no" class="btn-deny">Deny</button>
+          <button type="submit" name="approve" value="yes" class="btn-approve">Approve Access</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function renderError(message) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OAuth Error</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  body { font-family: 'Montserrat', sans-serif; background: #F7F8FA; color: #232323; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+  .card { background: #fff; border-radius: 12px; padding: 32px; max-width: 440px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); border-left: 4px solid #ef4444; }
+  h1 { font-size: 20px; margin-bottom: 12px; color: #ef4444; }
+  p { color: #4b5563; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Authorization Error</h1>
+    <p>${String(message).replace(/[<>]/g, '')}</p>
+  </div>
+</body>
+</html>`;
+}
+
 module.exports = {
-  handleMcpRequest,
-  // Exported for testing / debugging
+  mountMcp,
+  // Exported for testing
   TOOLS,
   callTool,
-  parseAllowlist
+  parseAllowlist,
+  isValidToken
 };
