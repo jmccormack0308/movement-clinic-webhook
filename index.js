@@ -811,6 +811,98 @@ function getTimestamp() {
   }) + ' PT';
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// SERVICE HEARTBEAT
+// Writes to Service_Health tab in the Business Finance Google Sheet every 5 min.
+// Auto-creates the tab on first heartbeat. Uses existing GOOGLE_SERVICE_ACCOUNT_JSON.
+// Errors are logged but never crash the service (graceful degradation).
+// ─────────────────────────────────────────────────────────────────────────────
+const BUSINESS_SHEET_ID = '1tQmCNgqdQg_ijSpxYfC6iD4J4NfFhSiz2krpeU0xAG4';
+const SERVICE_NAME = 'movement-clinic-webhook';
+
+let healthTabReady = false;
+let lastHeartbeatStatus = 'Not yet sent';
+let lastHeartbeatTime = null;
+
+async function ensureHealthTab(sheets) {
+  if (healthTabReady) return;
+  try {
+    const meta = await sheets.spreadsheets.get({ spreadsheetId: BUSINESS_SHEET_ID });
+    const exists = meta.data.sheets.some(s => s.properties.title === 'Service_Health');
+    if (!exists) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: BUSINESS_SHEET_ID,
+        requestBody: { requests: [{ addSheet: { properties: { title: 'Service_Health' } } }] },
+      });
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: BUSINESS_SHEET_ID,
+        range: 'Service_Health!A1:D1',
+        valueInputOption: 'RAW',
+        requestBody: { values: [['Service Name', 'Last Heartbeat', 'Status', 'URL']] },
+      });
+    }
+    healthTabReady = true;
+  } catch (err) {
+    console.error('[ensureHealthTab]', err.message);
+  }
+}
+
+async function writeHeartbeat(statusMessage = 'OK') {
+  try {
+    const { google } = require('googleapis');
+    const SERVICE_ACCOUNT_JSON = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '{}');
+    if (!SERVICE_ACCOUNT_JSON.client_email) return;
+
+    const auth = new google.auth.JWT({
+      email: SERVICE_ACCOUNT_JSON.client_email,
+      key: SERVICE_ACCOUNT_JSON.private_key,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+    await auth.authorize();
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    await ensureHealthTab(sheets);
+
+    const existing = await sheets.spreadsheets.values.get({
+      spreadsheetId: BUSINESS_SHEET_ID,
+      range: 'Service_Health!A:D',
+    }).catch(() => ({ data: { values: [] } }));
+    const rows = existing.data.values || [];
+    const now = new Date().toISOString();
+    let updated = false;
+
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === SERVICE_NAME) {
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: BUSINESS_SHEET_ID,
+          range: `Service_Health!A${i+1}:D${i+1}`,
+          valueInputOption: 'RAW',
+          requestBody: { values: [[SERVICE_NAME, now, statusMessage, process.env.RAILWAY_STATIC_URL || '']] },
+        });
+        updated = true;
+        break;
+      }
+    }
+    if (!updated) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: BUSINESS_SHEET_ID,
+        range: 'Service_Health!A:D',
+        valueInputOption: 'RAW',
+        requestBody: { values: [[SERVICE_NAME, now, statusMessage, process.env.RAILWAY_STATIC_URL || '']] },
+      });
+    }
+    lastHeartbeatStatus = statusMessage;
+    lastHeartbeatTime = now;
+  } catch (err) {
+    console.error('[heartbeat]', err.message);
+    lastHeartbeatStatus = 'ERROR: ' + err.message.slice(0, 60);
+  }
+}
+
+// Fire on startup + every 5 minutes
+setTimeout(() => writeHeartbeat('Started'), 5000);
+setInterval(() => writeHeartbeat('OK'), 5 * 60 * 1000);
+
 app.post('/webhook', async (req, res) => {
   const payload = req.body;
   if (payload.type !== 'call.transcript.completed') {
@@ -1629,7 +1721,20 @@ app.post('/update-sot', async (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok', timestamp: new Date().toISOString() });
+  const heartbeatAgeMin = lastHeartbeatTime
+    ? Math.floor((Date.now() - new Date(lastHeartbeatTime).getTime()) / 60000)
+    : null;
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    service: SERVICE_NAME,
+    heartbeat: {
+      lastSent: lastHeartbeatTime,
+      ageMinutes: heartbeatAgeMin,
+      lastStatus: lastHeartbeatStatus,
+      stale: heartbeatAgeMin !== null && heartbeatAgeMin > 30,
+    },
+  });
 });
 
 // GET /notion-debug?pin=2365 — inspect raw Notion API response for first page
