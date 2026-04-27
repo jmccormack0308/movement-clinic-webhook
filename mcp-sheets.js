@@ -532,27 +532,9 @@ function isValidToken(token) {
 
 async function handleMcpRequest(req, res) {
   const baseUrl = getBaseUrl(req);
-  const authHeader = req.headers.authorization || '';
-  const headerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
 
-  // Accept token from Authorization header OR ?token= query param
-  // (Claude.ai custom connectors send the full URL including query params on every request)
-  const queryToken = req.query.token || '';
-  const providedToken = headerToken || queryToken;
-
-  // Accept either a real OAuth-issued token OR the long-lived MCP_AUTH_TOKEN
-  const masterToken = process.env.MCP_AUTH_TOKEN;
-  const isMaster = masterToken && providedToken === masterToken;
-  const isOAuth = providedToken && isValidToken(providedToken);
-
-  if (!isMaster && !isOAuth) {
-    res.set('WWW-Authenticate', `Bearer resource_metadata="${baseUrl}/.well-known/oauth-protected-resource"`);
-    return res.status(401).json({
-      jsonrpc: '2.0',
-      error: { code: -32001, message: 'Unauthorized' },
-      id: null
-    });
-  }
+  // Claude.ai custom connectors send no auth headers — auth is handled at the connector level.
+  // MCP_AUTH_TOKEN is still accepted for direct curl testing.
 
   const { jsonrpc, method, params, id } = req.body || {};
 
