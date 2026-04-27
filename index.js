@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const { mountMcp } = require('./mcp-sheets');
+const { logCallEvent, upsertFunnelRow, markFunnelConversion, logConversion } = require('./sheets-logger');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -1495,6 +1496,59 @@ app.post('/webhook', async (req, res) => {
     }
 
     console.log(`Successfully processed call ${callId}: ${claudeResult.outcome} (confidence: ${confidenceScore}%)`);
+
+    // ── SHEETS LOGGING — fire-and-forget, errors swallowed in module ──────────────
+    // Writes to financial dashboard sheet: call_events (append) + marketing_funnel (upsert).
+    // Both functions handle their own errors and never throw, so a sheets outage
+    // cannot break the call processing pipeline.
+    try {
+      const processingMs = Date.now() - new Date(callObject.completedAt || Date.now()).getTime();
+      const isLeadPipeline = finalPipelineId &&
+        Object.keys(PIPELINE_NAMES).includes(finalPipelineId) &&
+        finalPipelineId !== EVAL_CUSTOMER_PIPELINE_ID &&
+        finalPipelineId !== CONTINUITY_PIPELINE_ID;
+
+      // Read first_appointment from PTEverywhere-synced GHL field for eval_held detection
+      const firstApptIso = await getFirstAppointmentDate(contact.id);
+      const evalHeld = firstApptIso && new Date(firstApptIso) < new Date();
+
+      // Always log the call event (audit log — every call captured)
+      await logCallEvent({
+        callSid: callId,
+        leadId: contact.id,
+        ptHandler: teamMember,
+        outcome: claudeResult.outcome,
+        confidenceScore,
+        stageBefore: STAGE_NAMES[previousStageId] || previousStageId || '',
+        stageAfter: STAGE_NAMES[finalStageId] || finalStageId || '',
+        pipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || '',
+        transcriptLength: transcript.length,
+        processingMs: processingMs > 0 ? processingMs : null
+      });
+
+      // Only upsert the funnel row for actual lead pipelines — skip existing customers,
+      // wrong-number outcomes, and not-a-patient-call outcomes (those returned earlier).
+      if (isLeadPipeline && claudeResult.outcome !== 'WRONG_NUMBER') {
+        const nameParts = (finalContactName || '').trim().split(' ');
+        const fName = nameParts[0] || '';
+        const lName = nameParts.slice(1).join(' ') || '';
+        await upsertFunnelRow({
+          leadId: contact.id,
+          firstName: fName,
+          lastName: lName,
+          phone: contactPhone || contact.phone || '',
+          sourcePipeline: PIPELINE_NAMES[finalPipelineId] || finalPipelineId || '',
+          currentStage: STAGE_NAMES[finalStageId] || finalStageId || '',
+          evalScheduled: claudeResult.outcome === 'EVAL_SCHEDULED',
+          evalHeld: !!evalHeld,
+          firstVisitDate: firstApptIso ? firstApptIso.split('T')[0] : ''
+        });
+      }
+    } catch (sheetsErr) {
+      // Defensive — sheets-logger swallows its own errors but catch any unexpected scope errors here
+      console.error('[sheets logging block] unexpected error:', sheetsErr.message);
+    }
+    // ── END SHEETS LOGGING ────────────────────────────────────────────────────────
 
   } catch (error) {
     console.error('Error processing webhook:', error.response?.data || error.message);
@@ -3807,6 +3861,38 @@ async function getContactLTV(contactId) {
   }
 }
 
+// Reads the PTEverywhere-synced "first_appointment" custom field from a GHL contact.
+// Returns ISO date string if present, or null. Used to determine eval_held status
+// for the marketing_funnel sheet — eval is "held" if first_appointment is in the past.
+async function getFirstAppointmentDate(contactId) {
+  try {
+    const response = await axios.get(
+      `https://services.leadconnectorhq.com/contacts/${contactId}`,
+      { headers: { 'Authorization': `Bearer ${GHL_API_KEY}`, 'Version': '2021-07-28' } }
+    );
+    const contact = response.data.contact;
+    const customFields = contact.customFields || [];
+    // GHL key may be 'first_appointment' or it may use the field's id; check both
+    const apptField = customFields.find(f =>
+      f.key === 'first_appointment' ||
+      f.id === 'first_appointment' ||
+      (f.fieldKey && f.fieldKey.includes('first_appointment'))
+    );
+    if (apptField && apptField.value) {
+      // GHL date fields can be returned as ISO string or unix ms
+      const v = apptField.value;
+      if (typeof v === 'number' || /^\d+$/.test(v)) {
+        return new Date(parseInt(v)).toISOString();
+      }
+      return new Date(v).toISOString();
+    }
+    return null;
+  } catch (err) {
+    console.error('Failed to get first_appointment:', err.message);
+    return null;
+  }
+}
+
 async function checkExistingCustomer(contactId, allOpportunities) {
   // Signal 1: Has opportunity at Package Purchased in Customer Pipeline
   const hasPackagePurchased = allOpportunities.some(
@@ -4795,6 +4881,47 @@ app.post('/post-eval', async (req, res) => {
     } catch (emailErr) {
       console.error('Failed to generate eval email content:', emailErr.message);
     }
+
+    // ── SHEETS LOGGING — conversions tab + funnel update ──────────────────────────
+    // Append the conversion event to the conversions tab (audit log) AND update
+    // the marketing_funnel row to mark post_eval_submitted = TRUE with outcome.
+    // Both fail-open — errors logged inside sheets-logger module, never thrown.
+    try {
+      const convOutcome = outcome === 'Converted'
+        ? 'converted'
+        : outcome === 'Lost'
+          ? 'did not convert'
+          : claudeResult.pending_subtype === 'PENDING_CALL'
+            ? 'pending follow-up call'
+            : claudeResult.pending_subtype === 'PENDING_VISIT'
+              ? 'pending follow-up visit'
+              : 'pending';
+      const followUpDetails = [
+        claudeResult.follow_up_visit_date ? `Visit: ${claudeResult.follow_up_visit_date}` : null,
+        claudeResult.follow_up_call_date ? `Call: ${claudeResult.follow_up_call_date} ${claudeResult.follow_up_call_time || ''}`.trim() : null
+      ].filter(Boolean).join(' | ');
+
+      await logConversion({
+        leadId: contact ? contact.id : '',
+        ptName: evaluating_pt || '',
+        outcome: convOutcome,
+        problem: claudeResult.evaluation_summary || '',
+        treatmentPlan: claudeResult.next_steps || '',
+        objection: [claudeResult.objection_category, claudeResult.objection_detail].filter(Boolean).join(' — '),
+        followUpDetails
+      });
+
+      if (contact && contact.id) {
+        await markFunnelConversion({
+          leadId: contact.id,
+          outcome: convOutcome,
+          objection: claudeResult.objection_category || ''
+        });
+      }
+    } catch (sheetsErr) {
+      console.error('[post-eval sheets logging] unexpected error:', sheetsErr.message);
+    }
+    // ── END SHEETS LOGGING ────────────────────────────────────────────────────────
 
     res.status(200).json({ success: true, outcome, pending_subtype: claudeResult.pending_subtype });
 
