@@ -25,6 +25,8 @@
 
 const { google } = require('googleapis');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 // ============================================================
 // CONFIGURATION
@@ -35,18 +37,58 @@ const AUTH_CODE_TTL_MS = 10 * 60 * 1000; // 10 min
 const REGISTRATION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 // ============================================================
-// IN-MEMORY STORES
+// FILE-PERSISTED OAUTH STORES
 // ============================================================
-// For Jordan's usage pattern (1 user, occasional re-auth), in-memory
-// is fine. If Railway restarts, you'll re-auth once. To persist across
-// restarts, swap these for the existing /data file pattern used by
-// processed-calls.json elsewhere in index.js.
+// Persisted to /data volume (same as processed-calls.json) so
+// Railway restarts mid-OAuth-flow don't wipe clients/codes/tokens.
 
-const clients = new Map();        // client_id → { client_id, redirect_uris, created_at }
-const authCodes = new Map();      // code → { client_id, redirect_uri, code_challenge, expires_at }
-const accessTokens = new Map();   // token → { client_id, expires_at }
+const OAUTH_STATE_DIR = fs.existsSync('/data') ? '/data' : '/tmp';
+const OAUTH_STATE_FILE = path.join(OAUTH_STATE_DIR, 'oauth-state.json');
 
-// Periodic cleanup
+function loadOAuthState() {
+  try {
+    if (fs.existsSync(OAUTH_STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(OAUTH_STATE_FILE, 'utf8'));
+    }
+  } catch (e) { /* fall through */ }
+  return { clients: {}, authCodes: {}, accessTokens: {} };
+}
+
+function saveOAuthState() {
+  try {
+    const now = Date.now();
+    // Prune expired entries before saving
+    const state = loadOAuthState();
+    for (const [code, data] of Object.entries(state.authCodes)) {
+      if (data.expires_at < now) delete state.authCodes[code];
+    }
+    for (const [token, data] of Object.entries(state.accessTokens)) {
+      if (data.expires_at < now) delete state.accessTokens[token];
+    }
+    for (const [id, data] of Object.entries(state.clients)) {
+      if (data.created_at + REGISTRATION_TTL_MS < now) delete state.clients[id];
+    }
+    // Write current in-memory maps back to disk
+    const out = {
+      clients: Object.fromEntries(clients),
+      authCodes: Object.fromEntries(authCodes),
+      accessTokens: Object.fromEntries(accessTokens)
+    };
+    fs.writeFileSync(OAUTH_STATE_FILE, JSON.stringify(out));
+  } catch (e) {
+    console.error('[MCP] Failed to save oauth-state.json:', e.message);
+  }
+}
+
+// Hydrate Maps from disk on startup
+const _initialState = loadOAuthState();
+const clients = new Map(Object.entries(_initialState.clients || {}));
+const authCodes = new Map(Object.entries(_initialState.authCodes || {}));
+const accessTokens = new Map(Object.entries(_initialState.accessTokens || {}));
+
+console.log(`[MCP] OAuth state loaded — ${clients.size} clients, ${authCodes.size} codes, ${accessTokens.size} tokens`);
+
+// Periodic cleanup + persist
 setInterval(() => {
   const now = Date.now();
   for (const [code, data] of authCodes) {
@@ -58,6 +100,7 @@ setInterval(() => {
   for (const [id, data] of clients) {
     if (data.created_at + REGISTRATION_TTL_MS < now) clients.delete(id);
   }
+  saveOAuthState();
 }, 60 * 60 * 1000);
 
 // ============================================================
@@ -349,6 +392,7 @@ function handleRegister(req, res) {
     created_at: Date.now()
   };
   clients.set(client_id, record);
+  saveOAuthState();
 
   res.status(201).json({
     client_id,
@@ -414,6 +458,7 @@ function handleAuthorizePost(req, res) {
     code_challenge_method: code_challenge_method || 'plain',
     expires_at: Date.now() + AUTH_CODE_TTL_MS
   });
+  saveOAuthState();
 
   const url = new URL(redirect_uri);
   url.searchParams.set('code', code);
@@ -460,6 +505,7 @@ function handleToken(req, res) {
     client_id,
     expires_at: Date.now() + ACCESS_TOKEN_TTL_MS
   });
+  saveOAuthState();
 
   res.json({
     access_token,
