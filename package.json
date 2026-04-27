@@ -7,6 +7,7 @@
     "start": "node --max-http-header-size=524288 index.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@notionhq/client": "^5.19.0",
     "axios": "^1.6.0",
     "csv-parse": "^6.2.1",
@@ -14,7 +15,8 @@
     "googleapis": "^171.4.0",
     "ioredis": "^5.10.1",
     "multer": "^2.1.1",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "zod": "^4.3.6"
   },
   "engines": {
     "node": ">=18.0.0"
