@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { mountMcp } = require('./mcp-sheets');
 const { logCallEvent, upsertFunnelRow, markFunnelConversion, logConversion } = require('./sheets-logger');
+const { firstNameLastInitial, initials, redactPhone, buildClinicalLine, scrubNameFromText } = require('./deidentify');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -628,6 +629,15 @@ function buildCallSlackBlocks(params) {
     confidenceScore, confidenceReason, contactId
   } = params;
 
+  // De-identification — Slack does not have a BAA on standard plans.
+  // Pipeline manager channel rule: first name + last initial, no clinical content.
+  const displayName = firstNameLastInitial(contactName);
+  const displayPhone = redactPhone(contactPhone);
+  // Outcome line is shown as a status only — Claude's freeform `note` may contain
+  // names/clinical details, so we scrub the patient's name and use the structured
+  // outcome label as the primary display.
+  const safeNote = note ? scrubNameFromText(note, contactName) : '';
+
   const hasFlag = redFlags && redFlags !== 'None' && redFlags !== 'null' && redFlags !== 'None identified.';
   const score = parseInt(confidenceScore) || 0;
   const confidenceEmoji = score >= 90 ? ':large_green_circle:' : score >= 80 ? ':large_yellow_circle:' : ':red_circle:';
@@ -642,13 +652,13 @@ function buildCallSlackBlocks(params) {
     { type: 'section', text: { type: 'mrkdwn', text: confidenceText + (confidenceReason ? '\n_' + confidenceReason + '_' : '') } },
     { type: 'divider' },
     { type: 'section', fields: [
-      { type: 'mrkdwn', text: '*Name*\n' + capitalizeFullName(contactName) },
-      { type: 'mrkdwn', text: '*Phone*\n' + (contactPhone || 'Unknown') },
+      { type: 'mrkdwn', text: '*Patient*\n' + displayName },
+      { type: 'mrkdwn', text: '*Phone*\n' + displayPhone },
       { type: 'mrkdwn', text: '*Call Time*\n' + (callTime || 'Unknown') },
       { type: 'mrkdwn', text: '*Team Member on Phone Call*\n' + (teamMember || 'Not identified') }
     ]},
     { type: 'divider' },
-    { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (note || outcome || 'See GHL for details') } },
+    { type: 'section', text: { type: 'mrkdwn', text: '*Outcome*\n' + (safeNote || outcome || 'See GHL for details') } },
     { type: 'divider' },
     { type: 'section', fields: [
       { type: 'mrkdwn', text: '*Pipeline*\n' + pipelineDisplay },
@@ -660,7 +670,7 @@ function buildCallSlackBlocks(params) {
   ];
 
   return {
-    fallback: 'Claude AI Assistant — Call Summary for ' + capitalizeFullName(contactName),
+    fallback: 'Claude AI Assistant — Call Summary for ' + displayName,
     blocks
   };
 }
@@ -1077,15 +1087,15 @@ app.post('/webhook', async (req, res) => {
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Name*\n${capitalizeFullName(contactName || 'Unknown')}` },
-                  { type: 'mrkdwn', text: `*Phone*\n${contactPhone || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${firstNameLastInitial(contactName)}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${redactPhone(contactPhone)}` },
                   { type: 'mrkdwn', text: `*Call Time*\n${ts}` },
                   { type: 'mrkdwn', text: `*Team Member*\n${teamMember || 'Not identified'}` }
                 ]
               },
               {
                 type: 'section',
-                text: { type: 'mrkdwn', text: `*What Claude observed*\n${claudeResult.note || 'No summary available.'}` }
+                text: { type: 'mrkdwn', text: `*What Claude observed*\n${scrubNameFromText(claudeResult.note || 'No summary available.', contactName || '')}` }
               },
               {
                 type: 'section',
@@ -1353,7 +1363,7 @@ app.post('/webhook', async (req, res) => {
           'https://slack.com/api/chat.postMessage',
           {
             channel: EVALS_SCHEDULED_CHANNEL,
-            text: `Eval scheduled — ${capitalizeFullName(finalContactName || 'Unknown')}`,
+            text: `Eval scheduled — ${initials(finalContactName || 'Unknown')}`,
             blocks: [
               {
                 type: 'header',
@@ -1367,8 +1377,8 @@ app.post('/webhook', async (req, res) => {
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Patient*\n${capitalizeFullName(finalContactName || 'Unknown')}` },
-                  { type: 'mrkdwn', text: `*Phone*\n${contactPhone || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${initials(finalContactName || 'Unknown')}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${redactPhone(contactPhone)}` },
                   { type: 'mrkdwn', text: `*PT on Call*\n${ptTag}` },
                   { type: 'mrkdwn', text: `*Source Pipeline*\n${PIPELINE_NAMES[finalPipelineId] || 'Unknown'}` }
                 ]
@@ -4414,7 +4424,7 @@ app.post('/post-eval', async (req, res) => {
           'https://slack.com/api/chat.postMessage',
           {
             channel: EVALS_SCHEDULED_CHANNEL,
-            text: `⚠️ Retroactive eval card created for ${patientFullNameTemp} — post-eval form already submitted`,
+            text: `⚠️ Retroactive eval card created for ${initials(patientFullNameTemp)} — post-eval form already submitted`,
             blocks: [
               {
                 type: 'header',
@@ -4431,8 +4441,8 @@ app.post('/post-eval', async (req, res) => {
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Patient*\n${patientFullNameTemp}` },
-                  { type: 'mrkdwn', text: `*Phone*\n${patient_phone || 'Unknown'}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${initials(patientFullNameTemp)}` },
+                  { type: 'mrkdwn', text: `*Phone*\n${redactPhone(patient_phone)}` },
                   { type: 'mrkdwn', text: `*Evaluating PT*\n${ptTagRetro}` },
                   { type: 'mrkdwn', text: `*Outcome*\n${outcome || 'Unknown'}` }
                 ]
@@ -4479,7 +4489,7 @@ app.post('/post-eval', async (req, res) => {
           'https://slack.com/api/chat.postMessage',
           {
             channel: DEALS_BOARD_CHANNEL,
-            text: `⚠️ Heads up — retroactive Customer Pipeline card created for ${patientFullNameTemp}`,
+            text: `⚠️ Heads up — retroactive Customer Pipeline card created for ${initials(patientFullNameTemp)}`,
             blocks: [
               {
                 type: 'header',
@@ -4489,17 +4499,17 @@ app.post('/post-eval', async (req, res) => {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: `${tagLine}\n\nA post-eval form was submitted for *${patientFullNameTemp}* but no "Evaluation Scheduled" Customer Pipeline card existed. Claude created it retroactively and will advance it to the appropriate stage based on the form outcome (*${outcome || 'Unknown'}*).\n\nPlease verify the GHL card looks correct.`
+                  text: `${tagLine}\n\nA post-eval form was submitted for *${initials(patientFullNameTemp)}* but no "Evaluation Scheduled" Customer Pipeline card existed. Claude created it retroactively and will advance it to the appropriate stage based on the form outcome (*${outcome || 'Unknown'}*).\n\nPlease verify the GHL card looks correct.`
                 }
               },
               { type: 'divider' },
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Patient*\n${patientFullNameTemp}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${initials(patientFullNameTemp)}` },
                   { type: 'mrkdwn', text: `*Evaluating PT*\n${evaluating_pt || 'Unknown'}` },
                   { type: 'mrkdwn', text: `*Form Outcome*\n${outcome || 'Unknown'}` },
-                  { type: 'mrkdwn', text: `*Phone*\n${patient_phone || 'Unknown'}` }
+                  { type: 'mrkdwn', text: `*Phone*\n${redactPhone(patient_phone)}` }
                 ]
               }
             ]
@@ -4658,7 +4668,7 @@ app.post('/post-eval', async (req, res) => {
           'https://slack.com/api/chat.postMessage',
           {
             channel: DEALS_BOARD_CHANNEL,
-            text: `❓ Unclear pipeline stage for ${patientFullName} — manual update needed`,
+            text: `❓ Unclear pipeline stage for ${initials(patientFullName)} — manual update needed`,
             blocks: [
               {
                 type: 'header',
@@ -4668,17 +4678,17 @@ app.post('/post-eval', async (req, res) => {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: `${tagLineUnclear}\n\nClaude could not determine the correct Customer Pipeline stage for *${patientFullName}* based on the post-eval form submission. The card is currently at *Evaluation Held*. Please review and move it to the correct stage manually.`
+                  text: `${tagLineUnclear}\n\nClaude could not determine the correct Customer Pipeline stage for *${initials(patientFullName)}* based on the post-eval form submission. The card is currently at *Evaluation Held*. Please review and move it to the correct stage manually.`
                 }
               },
               { type: 'divider' },
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Patient*\n${patientFullName}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${initials(patientFullName)}` },
                   { type: 'mrkdwn', text: `*Evaluating PT*\n${evaluating_pt || 'Unknown'}` },
                   { type: 'mrkdwn', text: `*Form Outcome*\n${outcome || 'Unknown'}` },
-                  { type: 'mrkdwn', text: `*Phone*\n${patient_phone || 'Unknown'}` }
+                  { type: 'mrkdwn', text: `*Phone*\n${redactPhone(patient_phone)}` }
                 ]
               },
               {
