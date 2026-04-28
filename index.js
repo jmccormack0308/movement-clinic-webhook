@@ -4345,7 +4345,7 @@ app.get('/post-eval', (req, res) => {
     btn.disabled = true;
     btn.textContent = 'Processing...';
     status.className = 'status loading';
-    status.textContent = 'This takes about 90 seconds. Go ahead and close this page when you're ready. Things will continue to process in the background.';
+    status.textContent = "This takes about 90 seconds. Go ahead and close this page when you're ready. Things will continue to process in the background.";
 
     const data = Object.fromEntries(new FormData(this));
 
