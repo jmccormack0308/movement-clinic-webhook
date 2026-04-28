@@ -1,12 +1,39 @@
+/**
+ * ⚠️  ARCHITECTURAL RULE — READ BEFORE ADDING CODE TO THIS FILE
+ *
+ * This file is becoming an orchestrator. New features should NOT be added here.
+ *
+ * Instead:
+ *   - Create a single file under `features/` (e.g. `features/my-new-feature.js`)
+ *   - Build it as a self-contained module that exports an Express router
+ *   - Mount it here with one line: app.use('/path', require('./features/my-new-feature'))
+ *
+ * Existing legacy code in this file will be migrated into `features/` over time.
+ * Do NOT regress that direction by inlining new logic here.
+ *
+ * If you find yourself adding more than ~30 lines for a new feature, stop and
+ * factor it into its own file under features/.
+ *
+ * See features/physician-letters.js for the canonical example.
+ */
+
 const express = require('express');
 const axios = require('axios');
 const { mountMcp } = require('./mcp-sheets');
 const { logCallEvent, upsertFunnelRow, markFunnelConversion, logConversion } = require('./sheets-logger');
 const { firstNameLastInitial, initials, redactPhone, buildClinicalLine, scrubNameFromText } = require('./deidentify');
 
+// ─── FEATURE MODULES ─────────────────────────────────────────────────────────
+// Each feature lives in its own file under features/ and exposes an Express
+// router. To add a new feature: create the file, mount it here.
+const physicianLetters = require('./features/physician-letters');
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// ─── FEATURE ROUTERS ─────────────────────────────────────────────────────────
+app.use('/eval-letter', physicianLetters);
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const GHL_API_KEY = process.env.GHL_API_KEY;
@@ -2516,6 +2543,9 @@ function showPage(name) {
 });
 
 const PORT = process.env.PORT || 3000;
+// Initialize feature modules (cron schedulers, etc.)
+physicianLetters.init();
+
 app.listen(PORT, () => { console.log(`Movement Clinic webhook server running on port ${PORT}`); });
 
 // ============================================================
@@ -4228,6 +4258,15 @@ app.get('/post-eval', (req, res) => {
               </div>
             </div>
           </div>
+
+          <div class="conditional-card" style="margin-top:12px;">
+            <div class="card-title">Physician Evaluation Summary</div>
+            <div style="font-size:13px; color:#555; margin-bottom:10px;">A formal evaluation summary letter will be drafted by Claude for your review and then faxed to the patient's physician. Uncheck if the patient is self-referred or does not want their physician contacted.</div>
+            <label style="display:flex; align-items:center; gap:10px; cursor:pointer; user-select:none;">
+              <input type="checkbox" name="generate_physician_letter" id="generate_physician_letter" value="yes" checked style="width:18px; height:18px;">
+              <span style="font-weight:600;">Generate physician evaluation summary for this patient</span>
+            </label>
+          </div>
         </div>
       </div>
     </div>
@@ -4352,7 +4391,8 @@ app.post('/post-eval', async (req, res) => {
       rehab_essentials,
       send_checkin,
       checkin_text,
-      transcript
+      transcript,
+      generate_physician_letter
     } = req.body;
 
     console.log(`Post-eval submission: ${patient_first_name} ${patient_last_name} — ${outcome}`);
@@ -4932,6 +4972,23 @@ app.post('/post-eval', async (req, res) => {
       console.error('[post-eval sheets logging] unexpected error:', sheetsErr.message);
     }
     // ── END SHEETS LOGGING ────────────────────────────────────────────────────────
+
+    // ─── PHYSICIAN LETTER KICKOFF ─────────────────────────────────────────────
+    // Fires only when outcome === 'Converted' AND PT did not uncheck the toggle.
+    // Runs in background — does not block the response. See features/physician-letters.js.
+    if (outcome === 'Converted' && (generate_physician_letter === 'yes' || generate_physician_letter === true || generate_physician_letter === 'on')) {
+      console.log('[letter] Kicking off physician letter generation in background');
+      physicianLetters.generateAndQueuePhysicianLetter({
+        transcript,
+        patient_first_name,
+        patient_last_name,
+        patient_phone,
+        patient_email,
+        evaluating_pt,
+        contact_id: contact.id,
+        ghl_opportunity_id: customerOpp.id
+      }).catch(err => console.error('[letter] Background generation error:', err.message));
+    }
 
     res.status(200).json({ success: true, outcome, pending_subtype: claudeResult.pending_subtype });
 
