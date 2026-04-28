@@ -4989,20 +4989,36 @@ app.post('/post-eval', async (req, res) => {
     // ── END SHEETS LOGGING ────────────────────────────────────────────────────────
 
     // ─── PHYSICIAN LETTER KICKOFF ─────────────────────────────────────────────
-    // Fires only when outcome === 'Converted' AND PT did not uncheck the toggle.
-    // Runs in background — does not block the response. See features/physician-letters.js.
-    if (outcome === 'Converted' && (generate_physician_letter === 'yes' || generate_physician_letter === true || generate_physician_letter === 'on')) {
-      console.log('[letter] Kicking off physician letter generation in background');
-      physicianLetters.generateAndQueuePhysicianLetter({
-        transcript,
-        patient_first_name,
-        patient_last_name,
-        patient_phone,
-        patient_email,
-        evaluating_pt,
-        contact_id: contact.id,
-        ghl_opportunity_id: customerOpp.id
-      }).catch(err => console.error('[letter] Background generation error:', err.message));
+    // Branches on outcome AND the toggle:
+    //   • Converted + toggle ON  → generate full letter workflow (Claude → review → fax)
+    //   • Converted + toggle OFF → log a "letter skipped" Slack notification + audit row
+    //   • Not Converted          → nothing (no letter for non-conversions)
+    // Both letter paths run in background — do not block the response.
+    // See features/physician-letters.js for both function implementations.
+    if (outcome === 'Converted') {
+      const letterToggleOn = (generate_physician_letter === 'yes' || generate_physician_letter === true || generate_physician_letter === 'on');
+      if (letterToggleOn) {
+        console.log('[letter] Kicking off physician letter generation in background');
+        physicianLetters.generateAndQueuePhysicianLetter({
+          transcript,
+          patient_first_name,
+          patient_last_name,
+          patient_phone,
+          patient_email,
+          evaluating_pt,
+          contact_id: contact.id,
+          ghl_opportunity_id: customerOpp.id
+        }).catch(err => console.error('[letter] Background generation error:', err.message));
+      } else {
+        console.log('[letter] Letter skipped by PT — posting notification to channel');
+        physicianLetters.notifyPhysicianLetterSkipped({
+          patient_first_name,
+          patient_last_name,
+          evaluating_pt,
+          contact_id: contact.id,
+          ghl_opportunity_id: customerOpp.id
+        }).catch(err => console.error('[letter] Skip notification error:', err.message));
+      }
     }
 
     console.log(`[post-eval] Background processing complete for ${patient_first_name} ${patient_last_name} — ${outcome}`);
