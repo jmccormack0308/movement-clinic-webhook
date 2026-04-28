@@ -4343,9 +4343,9 @@ app.get('/post-eval', (req, res) => {
     const btn = document.getElementById('submitBtn');
     const status = document.getElementById('statusMsg');
     btn.disabled = true;
-    btn.textContent = 'Processing...';
+    btn.textContent = 'Submitting...';
     status.className = 'status loading';
-    status.textContent = "This takes about 90 seconds. Go ahead and close this page when you're ready. Things will continue to process in the background.";
+    status.textContent = 'Validating and queueing your submission...';
 
     const data = Object.fromEntries(new FormData(this));
 
@@ -4357,20 +4357,24 @@ app.get('/post-eval', (req, res) => {
       });
       const result = await res.json();
       if (result.success) {
-        status.className = 'status success';
-        status.textContent = 'Evaluation submitted successfully. GHL has been updated.';
-        this.reset();
-        document.querySelectorAll('.conditional').forEach(el => el.classList.remove('visible'));
+        // Background processing has started. Redirect to thank-you page.
+        const params = new URLSearchParams({
+          patient: (data.patient_first_name || '') + ' ' + (data.patient_last_name || ''),
+          outcome: data.outcome || ''
+        });
+        if (data.outcome === 'Converted' && (data.generate_physician_letter === 'yes' || data.generate_physician_letter === 'on')) {
+          params.set('letter', '1');
+        }
+        window.location.href = '/post-eval/thank-you?' + params.toString();
       } else {
         throw new Error(result.error || 'Unknown error');
       }
     } catch (err) {
       status.className = 'status error';
       status.textContent = 'Something went wrong: ' + err.message + '. Please try again or contact Jordan.';
+      btn.disabled = false;
+      btn.textContent = 'Submit Evaluation';
     }
-
-    btn.disabled = false;
-    btn.textContent = 'Submit Evaluation';
   });
 </script>
 </body>
@@ -4423,6 +4427,17 @@ app.post('/post-eval', async (req, res) => {
     }
 
     console.log(`Found contact: ${contact.id}`);
+
+    // ─── EARLY RESPONSE — RESPOND TO PT IMMEDIATELY ──────────────────────────
+    // The PT now sees the thank-you page within 1-2 seconds. All subsequent
+    // processing happens in the background. Errors are caught in the outer
+    // try/catch and DM'd to Jordan via EVAL_JORDAN_WEBHOOK.
+    res.status(200).json({ success: true });
+
+    // Continue all processing async — wrapped in setImmediate to ensure
+    // the response flushes to the client before heavy work begins.
+    setImmediate(async () => {
+    try {
 
     // Find or create Customer Pipeline opportunity
     const allOpps = await getAllContactOpportunities(contact.id);
@@ -4990,41 +5005,249 @@ app.post('/post-eval', async (req, res) => {
       }).catch(err => console.error('[letter] Background generation error:', err.message));
     }
 
-    res.status(200).json({ success: true, outcome, pending_subtype: claudeResult.pending_subtype });
+    console.log(`[post-eval] Background processing complete for ${patient_first_name} ${patient_last_name} — ${outcome}`);
+
+    } catch (error) {
+      // Background error — PT has already received success response.
+      // Two notifications: PT (so they can decide to re-submit) + Jordan (system awareness).
+      console.error('[post-eval] Background processing error:', error.response?.data || error.message);
+
+      // ─── Notify the evaluating PT directly ──────────────────────────────────
+      // HIPAA-safe: patient initials only, no clinical content.
+      try {
+        const PT_SLACK_IDS_ERROR = {
+          'John Gan':         'U07TJC6GZFG',
+          'TJ Aquino':        'U0A9DL4RTKN',
+          'Chris Bostwick':   'U091NMDKTFV',
+          'Jordan McCormack': process.env.PT_SLACK_JORDAN || ''
+        };
+        const evalPtName = req.body.evaluating_pt;
+        const evalPtSlackId = evalPtName ? PT_SLACK_IDS_ERROR[evalPtName] : null;
+        const initialsForDM = `${(req.body.patient_first_name || '?')[0]}.${(req.body.patient_last_name || '?')[0]}.`;
+        if (evalPtSlackId && SLACK_BOT_TOKEN) {
+          await axios.post('https://slack.com/api/chat.postMessage', {
+            channel: evalPtSlackId,
+            text: `Post-eval submission issue — ${initialsForDM}`,
+            blocks: [
+              {
+                type: 'section',
+                text: {
+                  type: 'mrkdwn',
+                  text: `:warning: *Your post-eval submission for ${initialsForDM} hit an issue and didn't fully process.*\n\nJordan has been notified and will look into it. You may need to re-submit the form once it's resolved — please check with Jordan first to avoid duplicate processing.`
+                }
+              },
+              {
+                type: 'context',
+                elements: [
+                  { type: 'mrkdwn', text: `_Error type: ${(error.message || 'Unknown').slice(0, 120)}_` }
+                ]
+              }
+            ]
+          }, { headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` } });
+        }
+      } catch (ptNotifyErr) {
+        console.error('[post-eval] Failed to DM PT about background error:', ptNotifyErr.message);
+      }
+
+      // ─── Notify Jordan via existing webhook ─────────────────────────────────
+      try {
+        await axios.post(EVAL_JORDAN_WEBHOOK, {
+          contact_name: (req.body.patient_first_name + ' ' + req.body.patient_last_name) || 'Unknown',
+          contact_phone: req.body.patient_phone || 'Unknown',
+          evaluating_pt: req.body.evaluating_pt || 'Unknown',
+          outcome: 'ERROR — Background processing failed (PT saw success page)',
+          stage: 'N/A',
+          payment_method: 'N/A',
+          evaluation_summary: 'The post-eval form returned success to the PT, but background processing failed. Manual GHL update required.',
+          next_steps: 'Check Railway logs immediately. PT has been DM\'d directly and told to coordinate with you before re-submitting.',
+          red_flags: 'SYSTEM ERROR: ' + (error.message || 'Unknown error'),
+          calendar_appointment_created: 'N/A',
+          continuity_opportunity_created: 'N/A',
+          rehab_essentials: 'N/A',
+          checkin_text_scheduled: 'N/A',
+          send_checkin_text: 'N/A',
+          checkin_text: '',
+          objection_category: '',
+          objection_detail: '',
+          physician_name: '',
+          physician_office: '',
+          coaching_notes: 'No coaching notes — background processing failed.'
+        }, { headers: { 'Content-Type': 'application/json' } });
+      } catch (notifyErr) {
+        console.error('[post-eval] Failed to send error notification:', notifyErr.message);
+      }
+    }
+    });  // end setImmediate async
 
   } catch (error) {
-    console.error('Post-eval processing error:', error.response?.data || error.message);
-
-    // Error notification to Jordan
-    try {
-      await axios.post(EVAL_JORDAN_WEBHOOK, {
-        contact_name: req.body.patient_first_name + ' ' + req.body.patient_last_name || 'Unknown',
-        contact_phone: req.body.patient_phone || 'Unknown',
-        evaluating_pt: req.body.evaluating_pt || 'Unknown',
-        outcome: 'ERROR — Form submission failed',
-        stage: 'N/A',
-        payment_method: 'N/A',
-        evaluation_summary: 'The post-eval form failed to process. Manual GHL update required.',
-        next_steps: 'Check Railway logs immediately and update GHL manually.',
-        red_flags: 'SYSTEM ERROR: ' + (error.message || 'Unknown error'),
-        calendar_appointment_created: 'N/A',
-        continuity_opportunity_created: 'N/A',
-        rehab_essentials: 'N/A',
-        checkin_text_scheduled: 'N/A',
-        send_checkin_text: 'N/A',
-        checkin_text: '',
-        objection_category: '',
-        objection_detail: '',
-        physician_name: '',
-        physician_office: '',
-        coaching_notes: 'No coaching notes — form processing failed before analysis completed.'
-      }, { headers: { 'Content-Type': 'application/json' } });
-    } catch (notifyErr) {
-      console.error('Failed to send error notification:', notifyErr.message);
-    }
-
+    // Synchronous error before early response was sent.
+    console.error('[post-eval] Pre-response error:', error.response?.data || error.message);
     res.status(500).json({ error: error.message });
   }
+});
+
+
+// ── Post-Eval Thank-You Page ──────────────────────────────────────────────────
+app.get('/post-eval/thank-you', (req, res) => {
+  const patientName = req.query.patient || 'the patient';
+  const outcome = req.query.outcome || '';
+  const letterGenerated = req.query.letter === '1';
+
+  res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Submission Received — Movement Clinic</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #f0f4f8;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    color: #1a1a1a;
+  }
+  .card {
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid #e5e7eb;
+    padding: 48px 40px;
+    max-width: 520px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+  }
+  .checkmark {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: #ccfbf1;
+    color: #0f766e;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 40px;
+    font-weight: 700;
+    margin-bottom: 24px;
+  }
+  h1 {
+    font-family: 'DM Serif Display', serif;
+    font-size: 28px;
+    font-weight: 400;
+    margin-bottom: 12px;
+    letter-spacing: -0.3px;
+  }
+  .sub {
+    font-size: 15px;
+    color: #6b7280;
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }
+  .what-happened {
+    background: #f9fafb;
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 24px 0;
+    text-align: left;
+  }
+  .what-happened-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #6b7280;
+    margin-bottom: 12px;
+  }
+  .what-happened ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+  .what-happened li {
+    font-size: 14px;
+    color: #1a1a1a;
+    padding: 6px 0;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    line-height: 1.5;
+  }
+  .what-happened li::before {
+    content: '→';
+    color: #0f766e;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 28px;
+  }
+  .btn {
+    display: inline-block;
+    padding: 14px 28px;
+    border-radius: 100px;
+    font-family: 'DM Sans', sans-serif;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    text-decoration: none;
+    transition: all 0.15s;
+    border: none;
+  }
+  .btn-primary {
+    background: #1a1a1a;
+    color: #fff;
+  }
+  .btn-primary:hover {
+    background: #0f766e;
+  }
+  .btn-secondary {
+    background: transparent;
+    color: #6b7280;
+    border: 1.5px solid #e5e7eb;
+  }
+  .btn-secondary:hover {
+    border-color: #1a1a1a;
+    color: #1a1a1a;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="checkmark">✓</div>
+    <h1>Submission Received</h1>
+    <p class="sub">
+      Your evaluation summary for <strong>${patientName}</strong> has been received and is being processed in the background.
+    </p>
+
+    <div class="what-happened">
+      <div class="what-happened-title">What's happening now</div>
+      <ul>
+        <li>GHL contact + pipeline being updated</li>
+        <li>Evaluation summary email being generated and sent to Jordan</li>
+        <li>Patient text messages being scheduled</li>
+        ${letterGenerated ? '<li>Physician evaluation summary draft being created — you\'ll get a Slack DM when it\'s ready to review</li>' : ''}
+        <li>You\'ll get a Slack notification if anything fails</li>
+      </ul>
+    </div>
+
+    <p class="sub" style="margin-top: 24px;">
+      You're free to close this tab. Background processing will continue.
+    </p>
+
+    <div class="actions">
+      <a href="/post-eval" class="btn btn-primary">Submit Another Evaluation</a>
+    </div>
+  </div>
+</body>
+</html>`);
 });
 
 
