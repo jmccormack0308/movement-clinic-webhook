@@ -73,6 +73,10 @@ const PT_CREDENTIALS = {
   'John Gan':         process.env.PT_CREDS_JOHN   || 'PT, DPT'
 };
 
+// Admin team members who can route + fax letters. Edit this list to add/remove.
+// Used to populate radio buttons on the admin routing page.
+const ADMIN_TEAM = ['Katy', 'Shane', 'Other'];
+
 const CLINIC = {
   name:    process.env.CLINIC_NAME    || 'Movement Clinic Physical Therapy, Inc.',
   addr1:   process.env.CLINIC_ADDR_1  || '[Clinic Street Address]',
@@ -1064,6 +1068,11 @@ function renderAdminRoutingPage(draft) {
   .card h3 { margin: 0 0 12px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: #232323; }
   label { display: block; font-size: 12px; font-weight: 600; color: #4b5563; margin: 10px 0 4px 0; text-transform: uppercase; letter-spacing: 0.4px; }
   input[type="text"] { width: 100%; font-family: 'Montserrat', sans-serif; font-size: 15px; border: 1px solid #d8dde5; border-radius: 8px; padding: 12px; }
+  .radio-group { display: flex; gap: 10px; margin-top: 4px; }
+  .radio-pill { flex: 1; }
+  .radio-pill input[type="radio"] { display: none; }
+  .radio-pill label { display: flex; align-items: center; justify-content: center; padding: 14px 16px; border: 1.5px solid #d8dde5; border-radius: 10px; font-size: 15px; font-weight: 600; cursor: pointer; transition: all 0.15s; user-select: none; background: #fff; color: #232323; text-transform: none; letter-spacing: 0; margin: 0; }
+  .radio-pill input[type="radio"]:checked + label { border-color: #0065a3; background: #e6f0f7; color: #0065a3; }
   .btn-primary { background: #0065a3; color: #fff; border: none; border-radius: 10px; padding: 14px 20px; width: 100%; font-family: 'Montserrat', sans-serif; font-weight: 600; font-size: 15px; cursor: pointer; margin-top: 8px; }
   .btn-primary:disabled { background: #e5e7eb; color: #9ca3af; cursor: not-allowed; }
   .btn-yellow { background: #FFD70A; color: #232323; }
@@ -1108,8 +1117,16 @@ function renderAdminRoutingPage(draft) {
     <input type="text" id="physician_practice" value="${md.physician_practice || ''}" placeholder="Pasadena Family Medicine">
     <label>Fax Number *</label>
     <input type="text" id="physician_fax" value="${md.physician_fax || ''}" placeholder="(626) 555-0123">
-    <label>Your Name (admin) *</label>
-    <input type="text" id="admin_name" placeholder="Katy / Shane">
+    <label>Routed By *</label>
+    <div class="radio-group">
+      ${ADMIN_TEAM.map((name, idx) => `
+      <div class="radio-pill">
+        <input type="radio" name="admin_name" id="admin_name_${idx}" value="${name}" onclick="toggleAdminOther()">
+        <label for="admin_name_${idx}">${name}</label>
+      </div>
+      `).join('')}
+    </div>
+    <input type="text" id="admin_name_other" placeholder="Type name" style="display:none; margin-top:8px;">
     <button type="button" class="btn-primary btn-yellow" onclick="generatePdf()">Generate PDF & Notify Fax Queue</button>
     <div class="status-msg" id="statusMsg"></div>
   </div>` : ''}
@@ -1120,7 +1137,15 @@ function renderAdminRoutingPage(draft) {
     <a href="${draft.pdf_drive_link}" target="_blank" class="pdf-link">📄 Open PDF in Drive</a>
     <p style="font-size:13px; color:#4b5563;">Fax it from your fax workflow, then mark it as faxed below.</p>
     <label>Faxed By *</label>
-    <input type="text" id="faxed_by" placeholder="Katy / Shane">
+    <div class="radio-group">
+      ${ADMIN_TEAM.map((name, idx) => `
+      <div class="radio-pill">
+        <input type="radio" name="faxed_by" id="faxed_by_${idx}" value="${name}" onclick="toggleFaxedOther()">
+        <label for="faxed_by_${idx}">${name}</label>
+      </div>
+      `).join('')}
+    </div>
+    <input type="text" id="faxed_by_other" placeholder="Type name" style="display:none; margin-top:8px;">
     <button type="button" class="btn-primary btn-success" onclick="markFaxed()">Mark as Faxed</button>
     <div class="status-msg" id="statusMsg2"></div>
   </div>` : ''}
@@ -1134,17 +1159,34 @@ function renderAdminRoutingPage(draft) {
 </div>
 
 <script>
+function toggleAdminOther() {
+  const adminRadio = document.querySelector('input[name="admin_name"]:checked');
+  const otherInput = document.getElementById('admin_name_other');
+  if (adminRadio && adminRadio.value === 'Other') {
+    otherInput.style.display = 'block';
+    otherInput.focus();
+  } else {
+    otherInput.style.display = 'none';
+    otherInput.value = '';
+  }
+}
+
 async function generatePdf() {
   const name = document.getElementById('physician_name').value.trim();
   const fax = document.getElementById('physician_fax').value.trim();
   const practice = document.getElementById('physician_practice').value.trim();
-  const adminName = document.getElementById('admin_name').value.trim();
+  const adminRadio = document.querySelector('input[name="admin_name"]:checked');
+  let adminName = adminRadio ? adminRadio.value : '';
+  // If "Other" selected, use the typed value instead
+  if (adminName === 'Other') {
+    adminName = document.getElementById('admin_name_other').value.trim();
+  }
   const status = document.getElementById('statusMsg');
 
   if (!name || !fax || !adminName) {
     status.className = 'status-msg error';
     status.style.display = 'block';
-    status.textContent = 'Physician name, fax number, and your name are all required.';
+    status.textContent = 'Physician name, fax number, and selecting who routed are all required (type a name if you selected Other).';
     return;
   }
 
@@ -1172,13 +1214,30 @@ async function generatePdf() {
   }
 }
 
+function toggleFaxedOther() {
+  const byRadio = document.querySelector('input[name="faxed_by"]:checked');
+  const otherInput = document.getElementById('faxed_by_other');
+  if (byRadio && byRadio.value === 'Other') {
+    otherInput.style.display = 'block';
+    otherInput.focus();
+  } else {
+    otherInput.style.display = 'none';
+    otherInput.value = '';
+  }
+}
+
 async function markFaxed() {
-  const by = document.getElementById('faxed_by').value.trim();
+  const byRadio = document.querySelector('input[name="faxed_by"]:checked');
+  let by = byRadio ? byRadio.value : '';
+  // If "Other" selected, use the typed value instead
+  if (by === 'Other') {
+    by = document.getElementById('faxed_by_other').value.trim();
+  }
   const status = document.getElementById('statusMsg2');
   if (!by) {
     status.className = 'status-msg error';
     status.style.display = 'block';
-    status.textContent = 'Please enter your name.';
+    status.textContent = 'Please select who faxed it (type a name if you selected Other).';
     return;
   }
   try {
