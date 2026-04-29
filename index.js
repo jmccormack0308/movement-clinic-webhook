@@ -27,6 +27,7 @@ const { firstNameLastInitial, initials, redactPhone, buildClinicalLine, scrubNam
 // Each feature lives in its own file under features/ and exposes an Express
 // router. To add a new feature: create the file, mount it here.
 const physicianLetters = require('./features/physician-letters');
+const { routePatientCall, shouldBlockLeadOppCreation } = require('./features/patient-state-router');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -470,15 +471,7 @@ DECISION RULES:
 
 4. FOLLOW UP TIMEFRAME: If the person requests follow up at a specific future time, extract that timeframe as a number of days from today. For example "call me in 2 months" = 60, "reach out next January" = calculate from today, "in a few weeks" = 21. Set follow_up_days to this number if applicable, otherwise null.
 
-5. EVAL SCHEDULED CONTACT RULES: If the current stage is Eval Scheduled, apply these rules FIRST before the general outcomes below:
-
-EVAL SCHEDULED — CONFIRMATORY CALL: Call is about confirming the appointment, asking prep questions, logistics, or general check-in with no indication of cancellation. Set action to NO_ACTION. Add a note only. Do not move the stage.
-
-EVAL SCHEDULED — HARD CANCEL: Contact explicitly cancels and states they are going to an in-network facility, competitor, or otherwise will not be moving forward with the evaluation and gives no indication of returning. Move to Possible Disqualifier stage. Log the reason.
-
-EVAL SCHEDULED — SOFT CANCEL: Contact cancels or postpones due to softer reasons — timing, life circumstances, wants to think more, price concerns, needs to discuss with spouse — but has not ruled out returning. Move to Needs Follow Up or Talked To But Didnt Schedule stage. Log the reason. Set follow_up_days if a timeframe was mentioned.
-
-6. Based on the transcript, determine the outcome:
+5. Based on the transcript, determine the outcome:
 
 OUTCOME A - EVAL SCHEDULED: Person agreed to come in for an evaluation or free screen. Move to Eval Scheduled stage. Log appointment details if mentioned.
 
@@ -1042,6 +1035,45 @@ app.post('/webhook', async (req, res) => {
     const previousStageId = opportunity ? opportunity.pipelineStageId : null;
     const previousValue = opportunity ? opportunity.monetaryValue : null;
 
+    // ── PATIENT STATE ROUTER ─────────────────────────────────────────────────────
+    // BEFORE running the lead Claude classifier, check if this contact is an
+    // existing patient (any open Customer Pipeline opp, any open Continuity opp,
+    // or LTV > $500). If so, the patient-state-router takes ownership of the call
+    // and we never touch the lead pipeline. The router runs its own state-aware
+    // Claude prompt suited to existing patients.
+    //
+    // See features/patient-state-router.js for the full routing logic.
+    try {
+      const routerCtx = {
+        GHL_API_KEY,
+        GHL_LOCATION_ID,
+        ANTHROPIC_API_KEY,
+        SLACK_BOT_TOKEN,
+        addNoteToContact,
+        updateGHLOpportunity,
+        updateOpportunityCustomFields,
+        getContactLTV,
+        createGHLTask,
+        fireGHLSummaryWebhook
+      };
+      const routerResult = await routePatientCall({
+        ctx: routerCtx,
+        contact,
+        allOpps,
+        transcript,
+        contactPhone: redactPhone(contactPhone),
+        teamMember,
+        callId,
+        callerName: isPlaceholderName ? null : contactName
+      });
+      if (routerResult && routerResult.handled) {
+        console.log(`[orchestrator] Patient-state-router handled call (${routerResult.action}) — skipping lead flow`);
+        return; // exit setImmediate — router took ownership
+      }
+    } catch (routerErr) {
+      console.error('[orchestrator] patient-state-router threw — falling through to lead flow:', routerErr.message);
+    }
+
     const claudeResult = await analyzeWithClaude(
       transcript,
       previousPipelineId,
@@ -1192,53 +1224,52 @@ app.post('/webhook', async (req, res) => {
       markAdvancedToday(contact.id); // reset so day/week won't fire after an action stage today
     }
 
-    // Create opportunity if none exists — but first check if existing customer
+    // Create opportunity if none exists
     let activeOpportunity = opportunity;
     if (!activeOpportunity) {
-      const customerCheck = await checkExistingCustomer(contact.id, allOpps);
-
-      if (customerCheck.isCustomer) {
-        console.log('Existing customer detected — skipping lead pipeline, adding note only');
-        let noteTargetOpp = customerCheck.opp;
-
-        // LTV-only match with no Customer Pipeline card — create retroactive card
-        if (customerCheck.reason === 'ltv' && !noteTargetOpp) {
-          try {
-            noteTargetOpp = await createGHLOpportunity(contact.id, EVAL_CUSTOMER_PIPELINE_ID, EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED, finalContactName || 'Existing Customer');
-            await addGHLTag(contact.id, 'Retroactively Added to Customer Pipeline');
-            console.log('Created retroactive Customer Pipeline card for LTV customer');
-          } catch (err) {
-            console.error('Failed to create retroactive customer opportunity:', err.message);
-          }
+      // ── DEFENSE-IN-DEPTH GUARD ───────────────────────────────────────────────
+      // Final check: even though the patient-state-router runs upstream, ensure
+      // we NEVER create a lead opportunity for a contact who has any open
+      // Customer Pipeline opp (or open Continuity opp). This catches:
+      //   1. Race conditions (allOpps stale at router time, fresh now)
+      //   2. Future code paths that might bypass the router
+      //   3. Router exceptions that cause fall-through (the router catch-block
+      //      logs but doesn't bail — defense matters)
+      const blockCheck = shouldBlockLeadOppCreation(allOpps);
+      if (blockCheck.shouldBlock) {
+        console.log(`[guard] BLOCKED lead-opp creation — reason: ${blockCheck.reason} (existing opp: ${blockCheck.customerOppId})`);
+        // Log a note to the contact so the call isn't silently lost
+        try {
+          await addNoteToContact(contact.id,
+            `Claude AI Assistant:\n\n${getTimestamp()}\n\nLead opportunity creation BLOCKED — contact has an existing Customer Pipeline opportunity. ` +
+            `(${blockCheck.reason})\n\nClaude outcome: ${claudeResult.outcome}\n\n${claudeResult.note || ''}`
+          );
+        } catch (noteErr) {
+          console.error('[guard] Failed to add blocked-lead note:', noteErr.message);
         }
-
-        const ts = getTimestamp();
-        const existingNote = 'Claude AI Assistant:\n\n' + ts + '\n\nExisting customer identified (' +
-          (customerCheck.reason === 'package_purchased' ? 'Package Purchased in Customer Pipeline' :
-           customerCheck.reason === 'continuity' ? 'Active in Continuity Pipeline' :
-           'Lifetime value > $' + LTV_CUSTOMER_THRESHOLD) +
-          '). No lead pipeline action taken.\n\n' + (claudeResult.note || '');
-        await addNoteToContact(contact.id, existingNote);
-
-        await fireGHLSummaryWebhook({
-          contact_name: finalContactName || 'Unknown',
-          contact_phone: contactPhone || 'Unknown',
-          contact_id: contact.id,
-          outcome: 'EXISTING CUSTOMER — No Lead Action Taken',
-          call_summary: claudeResult.note || '',
-          pipeline_stage_info: 'Existing customer — no lead pipeline changes made',
-          pipeline_name: 'N/A', previous_stage: 'N/A', new_stage: 'N/A',
-          stage_changed: 'No', opportunity_value_previous: 'N/A', opportunity_value_new: 'N/A',
-          note_added: 'Yes', new_contact_created: isNewContact ? 'Yes' : 'No',
-          new_opportunity_created: customerCheck.reason === 'ltv' ? 'Yes — Retroactive Customer Pipeline' : 'No',
-          name_extracted_from_transcript: claudeResult.extracted_name || 'No',
-          disqualifier_flag: 'None', follow_up_task_created: 'No', follow_up_days: 'None'
-        });
-
-        return res.status(200).json({ success: true, outcome: 'EXISTING_CUSTOMER_NO_ACTION' });
+        // Still fire the GHL summary webhook so the email log captures it
+        try {
+          await fireGHLSummaryWebhook({
+            contact_name: finalContactName || 'Unknown',
+            contact_phone: contactPhone || 'Unknown',
+            contact_id: contact.id,
+            outcome: 'BLOCKED — Existing Customer Pipeline Opp',
+            call_summary: claudeResult.note || '',
+            pipeline_stage_info: `Lead opp creation blocked: ${blockCheck.reason}`,
+            pipeline_name: 'N/A', previous_stage: 'N/A', new_stage: 'N/A',
+            stage_changed: 'No', opportunity_value_previous: 'N/A', opportunity_value_new: 'N/A',
+            note_added: 'Yes', new_contact_created: isNewContact ? 'Yes' : 'No',
+            new_opportunity_created: 'No',
+            name_extracted_from_transcript: claudeResult.extracted_name || 'No',
+            disqualifier_flag: 'None', follow_up_task_created: 'No', follow_up_days: 'None'
+          });
+        } catch (whErr) {
+          console.error('[guard] Failed to fire summary webhook:', whErr.message);
+        }
+        return res.status(200).json({ success: true, outcome: 'LEAD_OPP_BLOCKED_EXISTING_CUSTOMER' });
       }
 
-      // Not an existing customer — proceed with lead opportunity creation
+      // No blocker — proceed with lead opportunity creation
       const defaultPipelineId = finalPipelineId;
       const defaultStageId = finalStageId || (PIPELINE_PROGRESSIONS[defaultPipelineId] ? PIPELINE_PROGRESSIONS[defaultPipelineId][0] : 'a43858b6-f06d-4939-8e31-a09739605200');
       try {
@@ -1356,6 +1387,9 @@ app.post('/webhook', async (req, res) => {
     await sendSlackMessage(PIPELINE_MANAGER_CHANNEL, callBlocks);
 
     // ── EVAL SCHEDULED: Notify #evaluations-scheduled with clinical summary ──────
+    // Existing patients are intercepted upstream by the patient-state-router
+    // (features/patient-state-router.js) — they never reach this code path.
+    // Anything that gets here is a true new lead transitioning to Eval Scheduled.
     if (claudeResult.outcome === 'EVAL_SCHEDULED') {
       try {
         const EVALS_SCHEDULED_CHANNEL = 'C07T7PK0GAE';
@@ -3673,9 +3707,18 @@ const EVAL_CUSTOMER_STAGES = {
   EVALUATION_SCHEDULED: '5e8c01e5-7ffb-4308-b1a6-91602ad012da',
   EVALUATION_HELD: '5d1f6b5e-93fa-480f-8d41-4fe4817c2e43',
   PENDING_VISIT: '6ff7cfd7-a308-4298-89ec-6855d7f383ff',
+  // Three-attempt phone call follow-up sequence. The post-eval form drops
+  // patients into PENDING_CALL_ATTEMPT_1; the patient-state-router progresses
+  // them through 2 → 3 → CLOSED_LOST as outbound attempts fail.
+  PENDING_CALL_ATTEMPT_1: '11bfcc99-c1c1-4936-8a04-73386796e1ea',
+  PENDING_CALL_ATTEMPT_2: '403e181d-86f3-48c8-954a-6795f292d522',
+  PENDING_CALL_ATTEMPT_3: '95f761ff-4e48-4cba-9796-7c41f290f0a3',
+  // Legacy alias — kept for backward compatibility with any downstream code.
+  // Maps to PENDING_CALL_ATTEMPT_1 since that's where new pending calls drop.
   PENDING_CALL: '11bfcc99-c1c1-4936-8a04-73386796e1ea',
   PENDING_NO_FIRM_TIME: 'eb8828cb-98c5-4cdd-8510-56a174540a4e',
   PACKAGE_PURCHASED: 'cc3f6b52-846a-4bcc-9cd5-646ca5712ea1',
+  ACTIVE_PATIENT_SPECIAL: '52fb05ae-4af2-40dc-9264-68e42de8b3ed',
   NOT_GOOD_TIME: 'f7ce8c60-7695-4da4-8c1b-5a030967647a',
   CLOSED_LOST: '5b13fe92-130a-4cd6-b9a5-eca5f8ff5729'
 };
@@ -3707,6 +3750,7 @@ const OBJECTION_CATEGORIES = [
   'Needs to Talk to Spouse',
   'Needs to Think About It',
   'Business Hours Don\'t Work',
+  'Cancelled Evaluation',
   'Other'
 ];
 
@@ -3934,18 +3978,26 @@ async function getFirstAppointmentDate(contactId) {
 }
 
 async function checkExistingCustomer(contactId, allOpportunities) {
-  // Signal 1: Has opportunity at Package Purchased in Customer Pipeline
-  const hasPackagePurchased = allOpportunities.some(
-    o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID &&
-    o.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED
+  // Signal 1: Any open opportunity in the Customer Pipeline (regardless of stage).
+  // This is the strongest existing-patient signal — it covers patients who have
+  // booked an eval (EVALUATION_SCHEDULED), held an eval (EVALUATION_HELD), are
+  // mid-pending (PENDING_*), or have purchased a package (PACKAGE_PURCHASED).
+  const customerOpp = allOpportunities.find(
+    o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID && o.status === 'open'
   );
-  if (hasPackagePurchased) return { isCustomer: true, reason: 'package_purchased', opp: allOpportunities.find(o => o.pipelineId === EVAL_CUSTOMER_PIPELINE_ID && o.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED) };
+  if (customerOpp) {
+    const reason = customerOpp.pipelineStageId === EVAL_CUSTOMER_STAGES.PACKAGE_PURCHASED
+      ? 'package_purchased'
+      : 'customer_pipeline';
+    return { isCustomer: true, reason, opp: customerOpp };
+  }
 
   // Signal 2: Has any opportunity in Continuity Pipeline
   const continuityOpp = allOpportunities.find(o => o.pipelineId === CONTINUITY_PIPELINE_ID);
   if (continuityOpp) return { isCustomer: true, reason: 'continuity', opp: continuityOpp };
 
-  // Signal 3: Lifetime value > $500
+  // Signal 3: Lifetime value > $500 (fallback for edge cases where the Customer
+  // Pipeline card may not exist but the contact has a paid history)
   const ltv = await getContactLTV(contactId);
   if (ltv > LTV_CUSTOMER_THRESHOLD) return { isCustomer: true, reason: 'ltv', opp: null, ltv };
 
@@ -4642,8 +4694,11 @@ app.post('/post-eval', async (req, res) => {
         if (claudeResult.follow_up_visit_date) noteLines.push(`Visit Date: ${claudeResult.follow_up_visit_date}`);
 
       } else if (subtype === 'PENDING_CALL') {
-        newStageId = EVAL_CUSTOMER_STAGES.PENDING_CALL;
-        noteLines.push(`Pending: Follow-Up Call Booked`);
+        // Pending Phone Call → drops the patient at Attempt 1. The patient-state-router
+        // (features/patient-state-router.js) progresses them through Attempt 2 → 3 → CLOSED_LOST
+        // as outbound follow-up calls fail to result in a commitment.
+        newStageId = EVAL_CUSTOMER_STAGES.PENDING_CALL_ATTEMPT_1;
+        noteLines.push(`Pending: Follow-Up Call Booked (Attempt 1)`);
         if (claudeResult.follow_up_call_date) noteLines.push(`Call Date: ${claudeResult.follow_up_call_date}`);
         if (claudeResult.follow_up_call_time) noteLines.push(`Call Time: ${claudeResult.follow_up_call_time}`);
 
