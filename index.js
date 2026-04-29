@@ -4178,11 +4178,11 @@ app.get('/post-eval', (req, res) => {
   }
 
   .card-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 1.5px;
-    color: var(--muted);
+    font-size: 18px;
+    font-weight: 700;
+    text-transform: none;
+    letter-spacing: -0.2px;
+    color: var(--ink);
     margin-bottom: 20px;
   }
 
