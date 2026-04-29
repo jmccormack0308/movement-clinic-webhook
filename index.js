@@ -620,7 +620,6 @@ async function createGHLTask(contactId, title, dueDate) {
 // Quo user ID → PT name mapping
 // These IDs come from the Quo API (answeredBy / userId field on call objects)
 const QUO_USER_MAP = {
-  'USA0DVhDhZ': 'John Gan',
   'USD3Kno24F': 'Shane Abbott',
   'USHRRvAybv': 'Katy Vieira',
   'USLnAV6kpl': 'Jordan McCormack',
@@ -1453,7 +1452,6 @@ app.post('/webhook', async (req, res) => {
       try {
         const EVALS_SCHEDULED_CHANNEL = 'C07T7PK0GAE';
         const PT_SLACK_IDS = {
-          'John Gan':       'U07TJC6GZFG',
           'TJ Aquino':      'U0A9DL4RTKN',
           'Chris Bostwick': 'U091NMDKTFV',
           'Shane Abbott':   'U07SAF0R2NQ',
@@ -3823,7 +3821,6 @@ const EVAL_TEAM_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlq
 const EVAL_JORDAN_WEBHOOK = 'https://services.leadconnectorhq.com/hooks/6oqyEZ6nlqPw4cDsaKzi/webhook-trigger/aeecdec8-5dbf-4bfe-9bd4-aa33f5962589';
 
 const PT_CALENDARS = {
-  'John Gan': { calendarId: 'APgRoYlz3Tba9ABff2iR', ghlUserId: 'Q9S0gVhPbAlXN7zPMgWo' },
   'TJ Aquino': { calendarId: 'E3UHHXgE7ZETRFeftWOt', ghlUserId: 'CqYh2l1GM4kIxfKtAXEZ' },
   'Chris Bostwick': { calendarId: 'UIOXtZg8Ucfk2S8N8Rj1', ghlUserId: 'awm68XlHfnAH8MVMIP4O' },
   'Jordan McCormack': { calendarId: 'j1GTYCTZU7vzKnlkLl8N', ghlUserId: 'sqeaYakcEi10FMK1OZwD' }
@@ -4604,7 +4601,6 @@ app.post('/post-eval', async (req, res) => {
       try {
         const EVALS_SCHEDULED_CHANNEL = 'C07T7PK0GAE';
         const PT_SLACK_IDS_EVAL = {
-          'John Gan':       'U07TJC6GZFG',
           'TJ Aquino':      'U0A9DL4RTKN',
           'Chris Bostwick': 'U091NMDKTFV',
           'Shane Abbott':   'U07SAF0R2NQ',
@@ -4664,7 +4660,6 @@ app.post('/post-eval', async (req, res) => {
       try {
         const DEALS_BOARD_CHANNEL = 'C0AU8CDTN4R';
         const PT_SLACK_IDS_DEALS = {
-          'John Gan':       'U07TJC6GZFG',
           'TJ Aquino':      'U0A9DL4RTKN',
           'Chris Bostwick': 'U091NMDKTFV',
           'Shane Abbott':   'U07SAF0R2NQ',
@@ -4844,7 +4839,6 @@ app.post('/post-eval', async (req, res) => {
       try {
         const DEALS_BOARD_CHANNEL = 'C0AU8CDTN4R';
         const PT_SLACK_IDS_UNCLEAR = {
-          'John Gan':       'U07TJC6GZFG',
           'TJ Aquino':      'U0A9DL4RTKN',
           'Chris Bostwick': 'U091NMDKTFV',
           'Shane Abbott':   'U07SAF0R2NQ',
@@ -5174,7 +5168,6 @@ app.post('/post-eval', async (req, res) => {
       // HIPAA-safe: patient initials only, no clinical content.
       try {
         const PT_SLACK_IDS_ERROR = {
-          'John Gan':         'U07TJC6GZFG',
           'TJ Aquino':        'U0A9DL4RTKN',
           'Chris Bostwick':   'U091NMDKTFV',
           'Jordan McCormack': process.env.PT_SLACK_JORDAN || ''
@@ -5732,7 +5725,6 @@ async function getNotionConversions() {
   const EMAIL_TO_PT = {
     'chris@movementclinicpt.com': 'Chris Bostwick',
     'tj@movementclinicpt.com':    'TJ Aquino',
-    'john@movementclinicpt.com':  'John Gan',
     'jordan@movementclinicpt.com':'Jordan McCormack'
   };
 
@@ -6408,15 +6400,6 @@ app.get('/metrics', (req, res) => {
             <input type="number" class="task-input" name="tasks_tj" min="0" value="0">
           </td>
         </tr>
-        <tr>
-          <td>
-            <div class="pt-name">John Gan</div>
-            <div class="pt-role">Physical Therapist</div>
-          </td>
-          <td>
-            <input type="number" class="task-input" name="tasks_john" min="0" value="0">
-          </td>
-        </tr>
       </tbody>
     </table>
   </div>
@@ -6763,8 +6746,7 @@ app.post('/metrics/submit', metricsUpload.fields([
     if (!skipOverdueTasks) {
       const taskMap = {
         'Chris Bostwick': parseInt(req.body.tasks_chris) || 0,
-        'TJ Aquino':      parseInt(req.body.tasks_tj) || 0,
-        'John Gan':       parseInt(req.body.tasks_john) || 0
+        'TJ Aquino':      parseInt(req.body.tasks_tj) || 0
       };
       let clinicTasks = 0;
       for (const [pt, count] of Object.entries(taskMap)) {
@@ -6816,8 +6798,7 @@ app.post('/metrics/submit', metricsUpload.fields([
     if (chartRows) {
       const PT_EMAIL_MAP = {
         'Chris Bostwick': 'chris@movementclinicpt.com',
-        'TJ Aquino':      'tj@movementclinicpt.com',
-        'John Gan':       'john@movementclinicpt.com'
+        'TJ Aquino':      'tj@movementclinicpt.com'
       };
       const submissionDate = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
 
@@ -6840,8 +6821,7 @@ app.post('/metrics/submit', metricsUpload.fields([
 
       const PT_SCORECARD_SLACK = {
         'Chris Bostwick': 'U091NMDKTFV',
-        'TJ Aquino':      'U0A9DL4RTKN',
-        'John Gan':       'U07TJC6GZFG'
+        'TJ Aquino':      'U0A9DL4RTKN'
       };
 
       const dmText = [

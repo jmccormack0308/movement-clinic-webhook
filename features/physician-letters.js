@@ -87,7 +87,6 @@ const BASE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
   : 'https://movement-clinic-webhook-production.up.railway.app';
 
 const PT_SLACK_IDS = {
-  'John Gan':         'U07TJC6GZFG',
   'TJ Aquino':        'U0A9DL4RTKN',
   'Chris Bostwick':   'U091NMDKTFV',
   'Jordan McCormack': process.env.PT_SLACK_JORDAN || ''
@@ -97,14 +96,12 @@ const PT_LICENSES = {
   'Jordan McCormack': process.env.PT_LICENSE_JORDAN || 'PT-PENDING',
   'Chris Bostwick':   process.env.PT_LICENSE_CHRIS  || 'PT-PENDING',
   'TJ Aquino':        process.env.PT_LICENSE_TJ     || 'PT-PENDING',
-  'John Gan':         process.env.PT_LICENSE_JOHN   || 'PT-PENDING'
 };
 
 const PT_CREDENTIALS = {
   'Jordan McCormack': process.env.PT_CREDS_JORDAN || 'PT, DPT',
   'Chris Bostwick':   process.env.PT_CREDS_CHRIS  || 'PT, DPT',
   'TJ Aquino':        process.env.PT_CREDS_TJ     || 'PT, DPT',
-  'John Gan':         process.env.PT_CREDS_JOHN   || 'PT, DPT'
 };
 
 const ADMIN_TEAM = ['Katy', 'Shane', 'Other'];
