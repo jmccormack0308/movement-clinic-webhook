@@ -40,6 +40,7 @@
 'use strict';
 
 const axios = require('axios');
+const { firstNameLastInitial, redactPhone } = require('../deidentify');
 
 // ─── Pipeline & Stage Constants ────────────────────────────────────────────────
 // The router uses an explicit map of Customer Pipeline stage IDs so it does not
@@ -453,12 +454,14 @@ async function createAdminFollowUpTask(ctx, contactId, claudeResult, contactName
 
 // ─── Main Routing Logic for Pre-Conversion Patients ────────────────────────────
 async function handlePreConversion(ctx, args) {
-  const { contact, contactName, contactPhone, opp, transcript, teamMember, callerName } = args;
+  const { contact, contactName, displayName, contactPhone, displayPhone, opp, transcript, teamMember, callerName } = args;
   const currentStageId = opp.pipelineStageId;
   const currentStageName = STAGE_NAMES[currentStageId] || currentStageId;
   const ghlUrl = `https://app.gohighlevel.com/v2/location/${ctx.GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
 
   // 1. Run Claude
+  // Note: we pass the FULL contactName to Claude (the API has BAA coverage for Anthropic enterprise),
+  // but every Slack message uses displayName/displayPhone (de-identified for Slack).
   const claudeResult = await analyzeWithRouterClaude(ctx, transcript, currentStageId, callerName || contactName);
   const action = claudeResult.action;
   console.log(`[router] Pre-conversion action: ${action} (stage: ${currentStageName})`);
@@ -475,14 +478,14 @@ async function handlePreConversion(ctx, args) {
       await moveCustomerOpp(ctx, opp.id, STAGES.PACKAGE_PURCHASED);
       await writeContactNote(ctx, contact.id, '🟢 Patient Committed to Package', claudeResult, currentStageName);
       const blocks = buildExistingPatientSummaryBlocks({
-        contactName, contactPhone, currentStageName: 'Package Purchased',
+        contactName: displayName, contactPhone: displayPhone, currentStageName: 'Package Purchased',
         claudeResult, ghlUrl,
         headerText: 'Patient Committed to Package',
         headerEmoji: '🟢',
         ptOnCall: teamMember
       });
       await postSlack(ctx, PIPELINE_MANAGER_CHANNEL,
-        `${contactName} committed to a package`, blocks);
+        `${displayName} committed to a package`, blocks);
       break;
     }
 
@@ -506,11 +509,11 @@ async function handlePreConversion(ctx, args) {
       await setObjectionFields(ctx, opp.id, claudeResult);
       await writeContactNote(ctx, contact.id, '🟡 Soft Cancel — No Firm Time', claudeResult, currentStageName);
 
-      // Admin task: follow up later
+      // Admin task: follow up later (uses full contactName — task is in GHL, BAA-covered)
       await createAdminFollowUpTask(ctx, contact.id, claudeResult, contactName);
 
       const blocks = buildExistingPatientSummaryBlocks({
-        contactName, contactPhone,
+        contactName: displayName, contactPhone: displayPhone,
         currentStageName: 'Pending - Needs Follow Up (No Firm Time)',
         claudeResult, ghlUrl,
         headerText: 'Soft Cancel — Patient Needs Follow Up Later',
@@ -519,7 +522,7 @@ async function handlePreConversion(ctx, args) {
       });
       const tags = ptSlackTagsForCall(teamMember);
       await postSlack(ctx, PIPELINE_MANAGER_CHANNEL,
-        `${tags} — Patient ${contactName} soft-cancelled, no firm timeframe`,
+        `${tags} — Patient ${displayName} soft-cancelled, no firm timeframe`,
         blocks);
       break;
     }
@@ -533,7 +536,7 @@ async function handlePreConversion(ctx, args) {
       await createAdminFollowUpTask(ctx, contact.id, claudeResult, contactName);
 
       const blocks = buildExistingPatientSummaryBlocks({
-        contactName, contactPhone,
+        contactName: displayName, contactPhone: displayPhone,
         currentStageName: 'Not a Good Time - Needs Follow Up',
         claudeResult, ghlUrl,
         headerText: 'Real-World Timing Blocker (HSA / Deductible / etc.)',
@@ -542,7 +545,7 @@ async function handlePreConversion(ctx, args) {
       });
       const tags = ptSlackTagsForCall(teamMember);
       await postSlack(ctx, PIPELINE_MANAGER_CHANNEL,
-        `${tags} — Patient ${contactName} flagged a timing blocker`,
+        `${tags} — Patient ${displayName} flagged a timing blocker`,
         blocks);
       break;
     }
@@ -553,7 +556,7 @@ async function handlePreConversion(ctx, args) {
       await writeContactNote(ctx, contact.id, '🔴 Patient Hard-Cancelled', claudeResult, currentStageName);
 
       const blocks = buildExistingPatientSummaryBlocks({
-        contactName, contactPhone,
+        contactName: displayName, contactPhone: displayPhone,
         currentStageName: 'Closed/Lost',
         claudeResult, ghlUrl,
         headerText: 'Patient Hard Cancel — Moved to Closed/Lost',
@@ -562,7 +565,7 @@ async function handlePreConversion(ctx, args) {
       });
       const tags = ptSlackTagsForCall(teamMember);
       await postSlack(ctx, PIPELINE_MANAGER_CHANNEL,
-        `${tags} — Patient ${contactName} hard cancelled`,
+        `${tags} — Patient ${displayName} hard cancelled`,
         blocks);
       break;
     }
@@ -586,7 +589,7 @@ async function handlePreConversion(ctx, args) {
         await setObjectionFields(ctx, opp.id, claudeResult);
         await writeContactNote(ctx, contact.id, '🔴 Pending Call Attempt 3 — Moved to Closed/Lost', claudeResult, currentStageName);
         const blocks = buildExistingPatientSummaryBlocks({
-          contactName, contactPhone,
+          contactName: displayName, contactPhone: displayPhone,
           currentStageName: 'Closed/Lost',
           claudeResult, ghlUrl,
           headerText: 'No Response After 3 Attempts — Closed/Lost',
@@ -595,7 +598,7 @@ async function handlePreConversion(ctx, args) {
         });
         const tags = ptSlackTagsForCall(teamMember);
         await postSlack(ctx, PIPELINE_MANAGER_CHANNEL,
-          `${tags} — ${contactName} did not respond after 3 attempts, moved to Closed/Lost`,
+          `${tags} — ${displayName} did not respond after 3 attempts, moved to Closed/Lost`,
           blocks);
       } else {
         await writeContactNote(ctx, contact.id, `📞 Advanced to ${STAGE_NAMES[nextStage]}`, claudeResult, currentStageName);
@@ -608,7 +611,7 @@ async function handlePreConversion(ctx, args) {
       // Don't move stage. Slack to deals-board tagging the eval PT for clarification.
       await writeContactNote(ctx, contact.id, '🟡 Unclear Outcome — PT Input Needed', claudeResult, currentStageName);
       const blocks = buildExistingPatientSummaryBlocks({
-        contactName, contactPhone, currentStageName,
+        contactName: displayName, contactPhone: displayPhone, currentStageName,
         claudeResult, ghlUrl,
         headerText: 'Unclear Outcome — PT Input Needed',
         headerEmoji: '🟡',
@@ -616,7 +619,7 @@ async function handlePreConversion(ctx, args) {
       });
       const tags = ptSlackTagsForCall(teamMember);
       await postSlack(ctx, DEALS_BOARD_CHANNEL,
-        `${tags} — ${contactName} call outcome unclear, please review`,
+        `${tags} — ${displayName} call outcome unclear, please review`,
         blocks);
       break;
     }
@@ -627,7 +630,7 @@ async function handlePreConversion(ctx, args) {
     }
   }
 
-  // GHL summary webhook — keeps the email log working for converted/pre-conversion alike
+  // GHL summary webhook — uses full contactName/contactPhone since GHL has BAA coverage
   try {
     await ctx.fireGHLSummaryWebhook({
       contact_name: contactName || 'Unknown',
@@ -658,7 +661,7 @@ async function handlePreConversion(ctx, args) {
 
 // ─── Main Routing Logic for Converted Patients ─────────────────────────────────
 async function handleConverted(ctx, args) {
-  const { contact, contactName, contactPhone, opp, reason, transcript, callerName } = args;
+  const { contact, contactName, displayName, contactPhone, displayPhone, opp, reason, transcript, callerName } = args;
   const currentStageName = opp ? (STAGE_NAMES[opp.pipelineStageId] || opp.pipelineStageId) : `LTV > $${LTV_CUSTOMER_THRESHOLD}`;
   console.log(`[router] Converted patient (reason: ${reason}, stage: ${currentStageName})`);
 
@@ -734,8 +737,10 @@ async function routePatientCall(args) {
     return { handled: false, reason: 'no_opps_data' };
   }
 
-  // Derive a clean display name from the contact
+  // Derive a clean display name from the contact (Slack-safe, de-identified)
   const contactName = (callerName || `${contact.firstName || ''} ${contact.lastName || ''}`.trim() || 'Unknown');
+  const displayName = firstNameLastInitial(contactName);
+  const displayPhone = redactPhone(contactPhone);
 
   let stateInfo;
   try {
@@ -753,7 +758,7 @@ async function routePatientCall(args) {
 
   if (stateInfo.state === 'converted') {
     return await handleConverted(ctx, {
-      contact, contactName, contactPhone,
+      contact, contactName, displayName, contactPhone, displayPhone,
       opp: stateInfo.opp,
       reason: stateInfo.reason,
       transcript, callerName
@@ -762,7 +767,7 @@ async function routePatientCall(args) {
 
   // pre_conversion
   return await handlePreConversion(ctx, {
-    contact, contactName, contactPhone,
+    contact, contactName, displayName, contactPhone, displayPhone,
     opp: stateInfo.opp,
     transcript, teamMember, callerName
   });

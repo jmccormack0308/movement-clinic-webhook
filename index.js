@@ -496,7 +496,7 @@ OPPORTUNITY VALUE RULE: Only suggest a value if person explicitly agreed to a sp
 CLINICAL SUMMARY RULE: Only populate clinical_summary when outcome is EVAL_SCHEDULED. For all other outcomes set clinical_summary to null. When populated, extract only what was explicitly stated in the transcript — do not infer or guess. If a field was not discussed, use null for that field.
 
 RETURN ONLY valid JSON with no other text, no preamble, no markdown:
-{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NOT_A_PATIENT_CALL or UNSURE","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent","clinical_summary":{"problem_areas":"chief complaint and body regions affected, or null","symptom_duration":"how long they have had the issue e.g. 3 weeks, 6 months, or null","prior_care":"any previous PT, chiro, injections, surgery, or other conservative care mentioned, or null","goals":"what they want to get back to doing, or null","plan_of_care_discussed":"any mention of visit packages, number of visits, cost discussions, or specific plan types e.g. 10-visit plan, or null","objections":"any hesitations, concerns, or objections raised during the call e.g. cost concern, insurance question, needs to check schedule, or null"}}}`;
+{"action":"UPDATE or NO_ACTION","outcome":"EVAL_SCHEDULED or NEEDS_FOLLOW_UP or ON_HOLD or POSSIBLE_DISQUALIFIER or WRONG_NUMBER or VOICEMAIL or NO_CONTACT or NOT_A_PATIENT_CALL or UNSURE","new_stage_id":"exact stage ID from reference above or null","new_pipeline_id":"pipeline ID or null","opportunity_value":null,"note":"2-4 sentence summary with timestamp context. Be factual and specific.","disqualifier_reason":"only if POSSIBLE_DISQUALIFIER otherwise null","extracted_name":"name from transcript or null","follow_up_days":null,"appointment_date_time":"if outcome is EVAL_SCHEDULED and the transcript explicitly mentions the booked appointment date/time (e.g. 'Tuesday at 9 AM' or 'May 5th at 2:30'), capture it as a human-readable string. Otherwise null.","confidence_score":85,"confidence_reason":"1 sentence explanation of confidence level — e.g. clear conversation with explicit booking confirmed, or short call with ambiguous intent","clinical_summary":{"problem_areas":"chief complaint and body regions affected, or null","symptom_duration":"how long they have had the issue e.g. 3 weeks, 6 months, or null","prior_care":"any previous PT, chiro, injections, surgery, or other conservative care mentioned, or null","goals":"what they want to get back to doing, or null","plan_of_care_discussed":"any mention of visit packages, number of visits, cost discussions, or specific plan types e.g. 10-visit plan, or null","objections":"any hesitations, concerns, or objections raised during the call e.g. cost concern, insurance question, needs to check schedule, or null"}}}`;
 
 async function getCallDetails(callId) {
   const response = await axios.get(`https://api.openphone.com/v1/calls/${callId}`, {
@@ -1390,7 +1390,66 @@ app.post('/webhook', async (req, res) => {
     // Existing patients are intercepted upstream by the patient-state-router
     // (features/patient-state-router.js) — they never reach this code path.
     // Anything that gets here is a true new lead transitioning to Eval Scheduled.
+    //
+    // EMPTY-SUMMARY GUARD: If Claude classified as EVAL_SCHEDULED but extracted
+    // ZERO clinical detail, the call probably wasn't actually an eval booking.
+    // Reroute to #claude-pipeline-manager with a misclassification flag instead
+    // of polluting #evaluations-scheduled with a useless empty summary.
     if (claudeResult.outcome === 'EVAL_SCHEDULED') {
+      const cs = claudeResult.clinical_summary || {};
+      const isEmpty = (v) => !v || v === 'null' || v === 'Not mentioned' || v === '_Not mentioned_';
+      const clinicalSummaryIsEmpty =
+        isEmpty(cs.problem_areas) &&
+        isEmpty(cs.symptom_duration) &&
+        isEmpty(cs.prior_care) &&
+        isEmpty(cs.goals) &&
+        isEmpty(cs.plan_of_care_discussed) &&
+        isEmpty(cs.objections);
+
+      if (clinicalSummaryIsEmpty) {
+        console.log(`[eval-guard] EVAL_SCHEDULED with empty clinical summary — likely misclassification. Rerouting to #claude-pipeline-manager.`);
+        try {
+          const ghlUrlSuspect = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
+          await axios.post(
+            'https://slack.com/api/chat.postMessage',
+            {
+              channel: PIPELINE_MANAGER_CHANNEL,
+              text: `🟡 Possible misclassification — ${firstNameLastInitial(finalContactName || 'Unknown')}`,
+              blocks: [
+                { type: 'header', text: { type: 'plain_text', text: '🟡 Possible Misclassification', emoji: true } },
+                {
+                  type: 'section',
+                  text: { type: 'mrkdwn', text: `Claude classified this call as *Evaluation Scheduled* but extracted no clinical context — the transcript may not have been an actual eval booking. Please verify in GHL.` }
+                },
+                { type: 'divider' },
+                {
+                  type: 'section',
+                  fields: [
+                    { type: 'mrkdwn', text: `*Patient*\n${firstNameLastInitial(finalContactName || 'Unknown')}` },
+                    { type: 'mrkdwn', text: `*Phone*\n${redactPhone(contactPhone)}` },
+                    { type: 'mrkdwn', text: `*PT on Call*\n${teamMember || 'Not identified'}` },
+                    { type: 'mrkdwn', text: `*Source Pipeline*\n${PIPELINE_NAMES[finalPipelineId] || 'Unknown'}` }
+                  ]
+                },
+                {
+                  type: 'section',
+                  text: { type: 'mrkdwn', text: `*Call Summary*\n${claudeResult.note || '_No summary_'}` }
+                },
+                { type: 'divider' },
+                {
+                  type: 'actions',
+                  elements: [
+                    { type: 'button', text: { type: 'plain_text', text: 'Open in GHL' }, url: ghlUrlSuspect }
+                  ]
+                }
+              ]
+            },
+            { headers: { 'Authorization': `Bearer ${SLACK_BOT_TOKEN}`, 'Content-Type': 'application/json' } }
+          );
+        } catch (suspectErr) {
+          console.error('[eval-guard] Failed to send misclassification alert:', suspectErr.response?.data || suspectErr.message);
+        }
+      } else {
       try {
         const EVALS_SCHEDULED_CHANNEL = 'C07T7PK0GAE';
         const PT_SLACK_IDS = {
@@ -1420,6 +1479,29 @@ app.post('/webhook', async (req, res) => {
         const confidenceEmoji = score >= 90 ? ':large_green_circle:' : score >= 80 ? ':large_yellow_circle:' : ':red_circle:';
         const ghlUrl = `https://app.gohighlevel.com/v2/location/${GHL_LOCATION_ID}/contacts/detail/${contact.id}`;
 
+        // Resolve appointment date/time. Sources in priority order:
+        //   1. Claude extracted it from the transcript (most current — captured live)
+        //   2. GHL "first_appointment" custom field (PTEverywhere-synced)
+        //   3. Fallback string when neither is available
+        let apptDisplay = null;
+        if (claudeResult.appointment_date_time && claudeResult.appointment_date_time !== 'null') {
+          apptDisplay = claudeResult.appointment_date_time;
+        } else {
+          try {
+            const apptIso = await getFirstAppointmentDate(contact.id);
+            if (apptIso) {
+              apptDisplay = new Date(apptIso).toLocaleString('en-US', {
+                timeZone: 'America/Los_Angeles',
+                weekday: 'short', month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit', hour12: true
+              });
+            }
+          } catch (apptErr) {
+            console.error('[eval-scheduled] Failed to fetch first_appointment:', apptErr.message);
+          }
+        }
+        const apptDisplayText = apptDisplay || '_See GHL — appointment not yet synced_';
+
         await axios.post(
           'https://slack.com/api/chat.postMessage',
           {
@@ -1433,6 +1515,10 @@ app.post('/webhook', async (req, res) => {
               {
                 type: 'section',
                 text: { type: 'mrkdwn', text: `${confidenceEmoji} *${score}% Confident in Transcript Interpretation*${claudeResult.confidence_reason ? '\n_' + claudeResult.confidence_reason + '_' : ''}` }
+              },
+              {
+                type: 'section',
+                text: { type: 'mrkdwn', text: `📅 *Appointment*\n${apptDisplayText}` }
               },
               { type: 'divider' },
               {
@@ -1495,6 +1581,7 @@ app.post('/webhook', async (req, res) => {
       } catch (evalSlackErr) {
         console.error('Failed to send #evaluations-scheduled notification:', evalSlackErr.response?.data || evalSlackErr.message);
       }
+      } // close else (clinical summary present)
     }
     // ── END EVAL SCHEDULED ────────────────────────────────────────────────────────
 
@@ -4596,7 +4683,7 @@ app.post('/post-eval', async (req, res) => {
           'https://slack.com/api/chat.postMessage',
           {
             channel: DEALS_BOARD_CHANNEL,
-            text: `⚠️ Heads up — retroactive Customer Pipeline card created for ${initials(patientFullNameTemp)}`,
+            text: `⚠️ Heads up — retroactive Customer Pipeline card created for ${firstNameLastInitial(patientFullNameTemp)}`,
             blocks: [
               {
                 type: 'header',
@@ -4606,14 +4693,14 @@ app.post('/post-eval', async (req, res) => {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: `${tagLine}\n\nA post-eval form was submitted for *${initials(patientFullNameTemp)}* but no "Evaluation Scheduled" Customer Pipeline card existed. Claude created it retroactively and will advance it to the appropriate stage based on the form outcome (*${outcome || 'Unknown'}*).\n\nPlease verify the GHL card looks correct.`
+                  text: `${tagLine}\n\nA post-eval form was submitted for *${firstNameLastInitial(patientFullNameTemp)}* but no "Evaluation Scheduled" Customer Pipeline card existed. Claude created it retroactively and will advance it to the appropriate stage based on the form outcome (*${outcome || 'Unknown'}*).\n\nPlease verify the GHL card looks correct.`
                 }
               },
               { type: 'divider' },
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Patient*\n${initials(patientFullNameTemp)}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${firstNameLastInitial(patientFullNameTemp)}` },
                   { type: 'mrkdwn', text: `*Evaluating PT*\n${evaluating_pt || 'Unknown'}` },
                   { type: 'mrkdwn', text: `*Form Outcome*\n${outcome || 'Unknown'}` },
                   { type: 'mrkdwn', text: `*Phone*\n${redactPhone(patient_phone)}` }
@@ -4778,7 +4865,7 @@ app.post('/post-eval', async (req, res) => {
           'https://slack.com/api/chat.postMessage',
           {
             channel: DEALS_BOARD_CHANNEL,
-            text: `❓ Unclear pipeline stage for ${initials(patientFullName)} — manual update needed`,
+            text: `❓ Unclear pipeline stage for ${firstNameLastInitial(patientFullName)} — manual update needed`,
             blocks: [
               {
                 type: 'header',
@@ -4788,14 +4875,14 @@ app.post('/post-eval', async (req, res) => {
                 type: 'section',
                 text: {
                   type: 'mrkdwn',
-                  text: `${tagLineUnclear}\n\nClaude could not determine the correct Customer Pipeline stage for *${initials(patientFullName)}* based on the post-eval form submission. The card is currently at *Evaluation Held*. Please review and move it to the correct stage manually.`
+                  text: `${tagLineUnclear}\n\nClaude could not determine the correct Customer Pipeline stage for *${firstNameLastInitial(patientFullName)}* based on the post-eval form submission. The card is currently at *Evaluation Held*. Please review and move it to the correct stage manually.`
                 }
               },
               { type: 'divider' },
               {
                 type: 'section',
                 fields: [
-                  { type: 'mrkdwn', text: `*Patient*\n${initials(patientFullName)}` },
+                  { type: 'mrkdwn', text: `*Patient*\n${firstNameLastInitial(patientFullName)}` },
                   { type: 'mrkdwn', text: `*Evaluating PT*\n${evaluating_pt || 'Unknown'}` },
                   { type: 'mrkdwn', text: `*Form Outcome*\n${outcome || 'Unknown'}` },
                   { type: 'mrkdwn', text: `*Phone*\n${redactPhone(patient_phone)}` }
