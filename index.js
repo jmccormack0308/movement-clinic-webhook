@@ -271,11 +271,44 @@ const PIPELINE_PROGRESSIONS = {
   ]
 };
 
+// Set of all "Eval Scheduled" stage IDs across the 7 lead pipelines.
+// Once a contact is at Eval Scheduled in a lead pipeline, the lead pipeline is
+// dead-letter for them — all future state lives in the Customer Pipeline. The
+// day/week auto-advance MUST NEVER move them out of Eval Scheduled.
+//
+// Defense-in-depth: the patient-state-router intercepts these contacts upstream
+// (and either auto-creates the missing Customer Pipeline card or routes them via
+// the existing Customer Pipeline opp). This guard ensures that even if the router
+// is bypassed (exception, race, future code path), the lead pipeline can never
+// advance them out of Eval Scheduled.
+const FROZEN_LEAD_STAGE_IDS = new Set([
+  '5a2bcdd2-efc6-4787-8b8d-5def8a889212', // FB Ad Eval Pipeline — Eval Scheduled
+  '375867bd-6e2f-437e-9a68-01ef80a7568b', // Friends and Family Referral 2.0 — Eval Scheduled
+  'c1c10a66-c896-409a-95bd-1661d1f72812', // Google Ads - Extension — Eval Scheduled
+  '4eedf687-3c25-47b8-a40d-92b9c6e8606f', // Google Ads - Website — Eval Scheduled
+  'd04df06e-817f-4ea9-8bee-61038fada054', // Incoming Calls — Eval Scheduled
+  'd19066ec-e4e2-43fe-bcc8-815e36a0cc9b', // Website Leads — Eval Scheduled
+  '42e1a1bd-2d4e-4b00-9106-223d0660d49f'  // Past Patient Reactivation - Manual — Eval Scheduled
+]);
+
 function getNextStageInProgression(pipelineId, currentStageId) {
+  // FREEZE GUARD: Eval Scheduled in any lead pipeline is dead-letter.
+  // Future activity belongs to the Customer Pipeline. Never advance from here.
+  if (FROZEN_LEAD_STAGE_IDS.has(currentStageId)) {
+    console.log(`[freeze-guard] Stage advancement blocked — contact at frozen lead Eval Scheduled stage ${currentStageId}`);
+    return null;
+  }
   const progression = PIPELINE_PROGRESSIONS[pipelineId];
   if (!progression) return null;
   const currentIndex = progression.indexOf(currentStageId);
-  if (currentIndex === -1) return progression[1] || null; // not in progression, start at Day 1
+  // BUG FIX (2026-04-29): Previously returned progression[1] (Day 1) when the
+  // current stage was not in the progression list — bouncing contacts at any
+  // non-progression stage (Eval Scheduled, On Hold, Possible Disqualifier, etc.)
+  // backward to Day 1. Now returns null so the caller knows not to advance.
+  if (currentIndex === -1) {
+    console.warn(`[stage-progression] Unknown stage ${currentStageId} in pipeline ${pipelineId} — returning null (no advance)`);
+    return null;
+  }
   if (currentIndex >= progression.length - 1) return progression[progression.length - 1]; // already at cap
   return progression[currentIndex + 1];
 }
@@ -1053,6 +1086,7 @@ app.post('/webhook', async (req, res) => {
         updateOpportunityCustomFields,
         getContactLTV,
         createGHLTask,
+        createGHLOpportunity,
         fireGHLSummaryWebhook
       };
       const routerResult = await routePatientCall({
@@ -4472,6 +4506,67 @@ app.get('/post-eval', (req, res) => {
       document.getElementById('checkinTextBox').classList.toggle('visible', this.value === 'Yes');
     });
   });
+
+  // ── URL Parameter Prefill ─────────────────────────────────────────────────
+  // Reads ?name=...&phone=...&email=...&pt=... from the URL on page load and
+  // populates the matching form fields. This lets Slack notification buttons
+  // (and other inbound entry points) pre-populate the form for the PT.
+  //
+  // Field mappings:
+  //   ?name=<full name>  → splits on first space; first word → patient_first_name,
+  //                        remaining → patient_last_name
+  //   ?phone=<phone>     → patient_phone
+  //   ?email=<email>     → patient_email
+  //   ?pt=<full PT name> → selects the matching evaluating_pt radio button
+  (function prefillFromUrl() {
+    try {
+      var params = new URLSearchParams(window.location.search);
+      var name = params.get('name');
+      if (name && name.trim()) {
+        // Split full name on first space — first token is first name, rest is last name
+        var trimmed = name.trim();
+        var firstSpace = trimmed.indexOf(' ');
+        if (firstSpace > 0) {
+          var first = trimmed.slice(0, firstSpace);
+          var last = trimmed.slice(firstSpace + 1).trim();
+          var firstInput = document.querySelector('input[name="patient_first_name"]');
+          var lastInput = document.querySelector('input[name="patient_last_name"]');
+          if (firstInput && !firstInput.value) firstInput.value = first;
+          if (lastInput && !lastInput.value) lastInput.value = last;
+        } else {
+          // Single-word name — put the whole thing in first name
+          var firstOnly = document.querySelector('input[name="patient_first_name"]');
+          if (firstOnly && !firstOnly.value) firstOnly.value = trimmed;
+        }
+      }
+      var phone = params.get('phone');
+      if (phone) {
+        var phoneInput = document.querySelector('input[name="patient_phone"]');
+        if (phoneInput && !phoneInput.value) phoneInput.value = phone;
+      }
+      var email = params.get('email');
+      if (email) {
+        var emailInput = document.querySelector('input[name="patient_email"]');
+        if (emailInput && !emailInput.value) emailInput.value = email;
+      }
+      var pt = params.get('pt');
+      if (pt) {
+        // Find the radio button whose value matches the PT name and check it.
+        // PT names are well-known values (Jordan McCormack, TJ Aquino, etc.) and
+        // contain no special characters, so direct selector works.
+        var radios = document.querySelectorAll('input[name="evaluating_pt"]');
+        for (var i = 0; i < radios.length; i++) {
+          if (radios[i].value === pt) {
+            radios[i].checked = true;
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Prefill failed:', err);
+      // Form is still usable — user can fill in manually
+    }
+  })();
 
   // Form submission
   document.getElementById('evalForm').addEventListener('submit', async function(e) {
